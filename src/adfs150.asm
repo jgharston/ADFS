@@ -35,7 +35,6 @@ ENDIF
        EQUS "(C)1984"
        EQUB &00
 IF TEST_SHIFT
-       EQUB &A9
 ENDIF
 ;;
 ;;
@@ -126,7 +125,6 @@ ENDIF
 ;; Set SCSI to command mode
 ;; ------------------------
 IF PATCH_SD
-.L807E RTS
 .ReadBreak
        JSR L9A88
        AND #&01
@@ -135,11 +133,6 @@ IF PATCH_SD
        JSR LA19E        ;; Do *MOUNT, then reselect ADFS
        JMP L9B4A
 ELIF PATCH_IDE
-.L807E RTS
-       NOP
-       NOP
-       NOP
-       RTS
 .ReadBreak
        JSR L9A88
        AND #&01
@@ -152,7 +145,6 @@ ELIF PATCH_IDE
 .MountCheck
        JSR LA19E        ;; Do *MOUNT, then reselect ADFS
        JMP L9B4A
-       EQUB &F9         ;; Junk - so a binary compare will pass
 ELSE
 .L807E LDY #&00         ;; Useful place to set Y=0
 .L8080 LDA #&01
@@ -226,8 +218,7 @@ ENDIF
        LDY #&19         ;; Loop 25*256*256 times
 .L80C8 BIT &FF          ;; Escape pressed?
        BMI L809F        ;; Abort with Escape error
-       SEC
-       SBC #&01
+       DEC A		;; SAVING: 2 bytes
        BNE L80C8        ;; Loop 256 times with A
        DEX
        BNE L80C8        ;; Loop 256 times with X
@@ -253,18 +244,15 @@ ENDIF
 ;; When hard drives are present, drives 4 to 7 map onto floppies 0 to 3.
 ;;
 IF INCLUDE_FLOPPY
-       LDA &CD          ;; Get ADFS I/O status
-       AND #&20         ;; Hard drive present?
+       JSR chunk_38
        BNE L8111        ;; Jump when hard drive present
 ;;
 ;; Access a floppy drive
 ;; ---------------------
-.L80F0 JSR LBA4B        ;; Do floppy operation
+.L80F0 JSR LBB46        ;; Do floppy operation SAVING: 3 bytes
        BEQ L8110        ;; Completed ok
        PHA              ;; Save result
-       LDY #&06         ;; Update ADFS error infomation
-       LDA (&B0),Y      ;; Get Drive+Sector b16-b19
-       ORA &C317        ;; OR with current drive
+       JSR chunk_14
        STA &C2D2        ;; Store
        INY
        LDA (&B0),Y      ;; Get Sector b8-b15
@@ -287,9 +275,7 @@ ENDIF
 ;;
 ;; Hard drive hardware is present. Check what drive is being accessed.
 ;;
-.L8111 LDY #&06
-       LDA (&B0),Y      ;; Get drive
-       ORA &C317        ;; OR with current drive
+.L8111 JSR chunk_14
 IF INCLUDE_FLOPPY
        BMI L80F0        ;; Jump back with 4,5,6,7 as floppies
 ENDIF
@@ -298,18 +284,18 @@ ENDIF
 ;; ------------------------------------------
 IF PATCH_IDE OR PATCH_SD
        LDY #0           ;; Access hard drive
-       NOP
 ELSE
        JSR L807E        ;; Write &01 to SCSI
 ENDIF
 ;;                                         Put SCSI in command mode?
-       INY              ;; Y=1
-       LDA (&B0),Y      ;; Get Addr0
-       STA &B2
-       INY
-       LDA (&B0),Y      ;; Get Addr1
-       STA &B3          ;; &B2/3=address b0-b15
-       INY
+{
+		        ;; Y=1/2; Get Addr0/1; &B2/3=address b0-b15
+.loop			;; SAVING: 2 bytes
+	INY
+	LDA (&B0),Y
+	STA &B1,Y
+	CPY #2:BNE loop
+}
        LDA (&B0),Y      ;; Get Addr2
        CMP #&FE
        BCC L8134        ;; Addr<&FFFE0000, language space
@@ -321,7 +307,7 @@ ENDIF
 .L8137
 IF PATCH_SD
 
-include "SD_Driver.asm"
+include "MMC_Driver.asm"
 
 ELIF PATCH_IDE
        LDY #5           ;; Get command, CC=Read, CS=Write
@@ -387,12 +373,10 @@ ELIF PATCH_IDE
 .TransTube
        BCC TubeRead
 .TubeWrite
-       LDA &FEE5
-       STA &FC40
+       JSR chunk_20
        BRA TransferByte
 .TubeRead
-       LDA &FC40
-       STA &FEE5
+       JSR chunk_21
        BRA TransferByte
 .CommandDone
        JSR GetResult    ;; Get IDE result
@@ -458,11 +442,9 @@ ELSE
        LDY #&05
        LDA (&B0),Y      ;; Get Command
        JSR L833E        ;; Send to SCSI data port
-       INY
-       LDA (&B0),Y      ;; Get Drive
-       ORA &C317        ;; OR with current drive
+       JSR chunk_14
        STA &C333
-       JMP L814C        ;; Send rest of command block
+       BRA L814C        ;; Send rest of command block SAVING: 1 byte
 ;;
 .L814A LDA (&B0),Y      ;; Get a command block byte
 .L814C JSR L833E        ;; Send to SCSI data port
@@ -509,15 +491,13 @@ ELSE
 .L8193 INY              ;; Point to next byte
        BNE L817C        ;; Loop for 256 bytes
        INC &B3          ;; Increment address high byte
-       JMP L817C        ;; Loop for next 256 bytes
+       BRA L817C        ;; Loop for next 256 bytes
 ;;
 .L819B BCS L81A5        ;; Jump for Tube read
-       LDA &FEE5        ;; Get byte from Tube
-       STA &FC40        ;; Write byte to SCSI data port
+       JSR chunk_20
        BRA L817C        ;; Loop for next byte
 ;;
-.L81A5 LDA &FC40        ;; Get byte from SCSI data port
-       STA &FEE5        ;; Write to Tube
+.L81A5 JSR chunk_21
        BRA L817C        ;; Loop for next byte
 ;;
 .L81AD JSR L803A        ;; Release Tube and restore screen
@@ -536,7 +516,7 @@ ELSE
 .L81CA TAX              ;; Save result in X
        AND #&02         ;; Check b1
        BEQ L81D2        ;; If b1=0, return with &00
-       JMP L825D        ;; Get status from SCSI and return it
+       BRA L825D        ;; Get status from SCSI and return it
 ;;
 .L81D2 LDA #&00         ;; A=0 - OK
 .L81D4 LDX &B0          ;; Restore XY pointer
@@ -595,6 +575,7 @@ ENDIF
        JSR L821B
 .L821B JSR L821E
 .L821E RTS
+
 ;;
 IF PATCH_SD
 ELIF PATCH_IDE
@@ -609,21 +590,19 @@ ELIF PATCH_IDE
        AND #63
        ADC #1
        STA &FC43
-       DEY              ;; Set sector b8-b15
+       DEY              ;; Set sector b8-b15 Y=7
        LDA (&B0),Y
        STA &FC44
-       DEY              ;; Set sector b16-b21
+       DEY              ;; Set sector b16-b21 Y=6
        LDA (&B0),Y
        JSR SetCylinder
-       INY              ;; Merge Drive and Head
-       INY
+       INY              ;; Merge Drive and Head Y=7
+       INY		;; Y=8
        EOR (&B0),Y
        AND #2
        EOR (&B0),Y
        JSR SetDrive     ;; Get command &08 or &0A
-       DEY
-       DEY
-       DEY
+       LDY #5
        LDA (&B0),Y
 .SetCommand
        AND #2           ;; Copy ~b1 into Cy
@@ -681,27 +660,18 @@ ELIF PATCH_IDE
        LDA ResultCodes,X
 .GetResOk
        RTS
-       BNE &82A5      ;; Junk - so a binary compare will pass
-       TXA            ;; Junk - so a binary compare will pass
-       JMP &81D4      ;; Junk - so a binary compare will pass
-       LDA #&FF       ;; Junk - so a binary compare will pass
-       JMP &81D4      ;; Junk - so a binary compare will pass
 ELSE
 .L821F LDX #&27
        LDY #&C2
 .L8223 JSR L8332
        BPL L822B
-       JMP L81AD
+       BRA L81AD
 ;;
 .L822B BVS L8245
        PHP
        LDA #&06
        JSR L8212
-.L8233 NOP
-       NOP
-       NOP
-       LDA &FEE5
-       STA &FC40
+.L8233 JSR chunk_20
        INY
        BNE L8233
        JSR L8200
@@ -711,11 +681,7 @@ ELSE
 .L8245 PHP
        LDA #&07
        JSR L8212
-.L824B NOP
-       NOP
-       NOP
-       LDA &FC40
-       STA &FEE5
+.L824B JSR chunk_21
        INY
        BNE L824B
        JSR L8200
@@ -725,7 +691,11 @@ ELSE
 ;;
 ;; Read result from SCSI and return it as a result
 ;; -----------------------------------------------
-.L825D JSR L807E        ;; Set SCSI to command mode
+.L825D 
+IF PATCH_IDE OR PATCH_SD
+ELSE
+       JSR L807E        ;; Set SCSI to command mode
+ENDIF
        LDA #&03
        TAX
        TAY
@@ -765,18 +735,11 @@ ENDIF
 .L82AA LDX #&15         ;; Point to &C215
        LDY #&C2
 .L82AE JSR L80A2        ;; Do a disk operation
-       BNE L82BD        ;; Jump ahead with error
-       RTS              ;; Exit if OK
-;;
-;; Do a disk access
-;; ----------------
-.L82B4 LDA &C22F
-       STA &C317
-       JMP L8BE2        ;; Not Found error
+       BEQ RTS2		;; Exit if OK	
 ;;
 .L82BD CMP #&25         ;; Hard drive error &25 (Bad drive)?
        BEQ L82B4        ;; Jump to give 'Not found' error
-       CMP #&65         ;; Floppy error &25 (Bad drive)
+       CMP #&65         ;; Floppy error &25 (Bad drive)?
        BEQ L82B4        ;; Jump to give 'Not found' error
        CMP #&6F         ;; Floppy error &2F (Abort)?
        BNE L82DC        ;; If no, report a disk error
@@ -788,6 +751,11 @@ ENDIF
        EQUB &11         ;; ERR=17
        EQUS "Escape"    ;; REPORT="Escape"
        EQUB &00
+;;
+;; Do a disk access
+;; ----------------
+.L82B4 JSR chunk_22
+       JMP L8BE2        ;; Not Found error
 ;;
 .L82DC CMP #&04         ;; Hard drive error &04 (Not ready)?
        BNE L82F4        ;; No, try other errors
@@ -813,11 +781,9 @@ ENDIF
        EQUB &00
 ;;
 IF NOT(PATCH_SD)        ;; Called only from Floppy and IDE code, not SD code
-.L831E JSR L8324
+.L831E JSR L833E	;; Wait until nor busy, then write command to command register
        BNE L82BD        ;; Generate disk error
-       RTS
-;;
-.L8324 JSR L833E        ;; Wait until nor busy, then write command to command register
+.RTS2
        RTS
 ENDIF
 ;;
@@ -828,14 +794,13 @@ IF PATCH_SD
 .L8328 LDA &CD
        AND #&FE
        STA &CD
+.RTS2
        RTS
 ELIF PATCH_IDE
 .L8328 LDA &CD
        AND #&FE
        STA &CD
        RTS
-       BNE L8328        ;; Junk - so a binary compare will pass
-       RTS              ;; Junk - so a binary compare will pass
 ELSE
 .L8328 LDA #&01         ;; Looking at bit 0
        PHP              ;; Save IRQ disable
@@ -849,7 +814,6 @@ ENDIF
 ;; Wait until SCSI ready to respond
 ;; --------------------------------
 IF PATCH_SD
-.L8332  RTS
 ELIF PATCH_IDE
 .WaitNotBusy
 .L8332  PHP             ;; Get IDE status
@@ -888,9 +852,8 @@ ENDIF
        INX
        BNE L8365
        LDY #&02
-.L835C LDA &C314,Y
-       STA &C22C,Y
-       DEY
+.L835C 
+       JSR lda_c314_y_sta_c22c_y_dey
        BPL L835C
 .L8365 LDA &C317
        STA &C22F
@@ -918,7 +881,8 @@ ENDIF
        CMP #&30
        BCS L839B
 .L8395 JSR L8451
-       JMP L83A2
+       BRA L83A2	; SAVING: 1 byte
+
 ;;
 .L839B CMP #&3A
        BCS L8395
@@ -997,14 +961,12 @@ ENDIF
        JSR L84CB
        JSR L849A
 .L843D JMP &0100
+
 ;;
 .L8440 EQUS ": ta "
 .L8445 EQUS " lennahc no "
 .L8451 PHA
-       LSR A
-       LSR A
-       LSR A
-       LSR A
+       JSR lsr_a_4
        JSR L845A
        PLA
 .L845A JSR L8462
@@ -1061,6 +1023,7 @@ ENDIF
        STA &C400,Y
        INY
        BNE L84B0
+.RTS3
 .L84BC RTS
 ;;
 .L84BD EQUS "E."        ;; Abbreviation of 'Exec'
@@ -1087,13 +1050,10 @@ ENDIF
 .L84D8 EQUS &0D, "SEY"
 .L84DC EQUS &00, "Hugo"
 ;;
-.L84E1 LDA &C237
-       ORA &C238
-       ORA &C239
-       BNE L84ED
-       RTS
+.L84E1 JSR chunk_23
+       BEQ RTS3
 ;;
-.L84ED LDX #&00
+       LDX #&00
 .L84EF CPX &C1FE
        BCS L8526
        INX
@@ -1127,10 +1087,9 @@ ENDIF
        BEQ L8529
        PLP
 .L8526 JMP L85B3
-;;
-.L8529 INX
-       INY
-       CPY #&03
+
+.L8529 
+       JSR chunk_15
        BNE L8518
        PLP
        LDX &B2
@@ -1139,8 +1098,7 @@ ENDIF
        PHP
        LDY #&00
 .L8538 PLP
-       LDA &BFFD,X
-       ADC &C0FD,X
+       JSR chunk_24
        PHP
        CMP &C234,Y
        BEQ L854A
@@ -1148,9 +1106,7 @@ ENDIF
        PLA
        BRA L8596
 ;;
-.L854A INX
-       INY
-       CPY #&03
+.L854A JSR chunk_15
        BNE L8538
        PLP
        LDX &B2
@@ -1158,13 +1114,9 @@ ENDIF
        CLC
        PHP
 .L8557 PLP
-       LDA &C0FD,X
-       ADC &C237,Y
-       STA &C0FD,X
+       JSR chunk_25
        PHP
-       INX
-       INY
-       CPY #&03
+       JSR chunk_15
        BNE L8557
        PLP
        LDY #&02
@@ -1190,7 +1142,8 @@ ENDIF
        STX &C1FE
        RTS
 ;;
-.L8596 LDY #&00
+.L8596 
+       LDY #&00
        CLC
        PHP
 .L859A LDA &C234,Y
@@ -1200,10 +1153,23 @@ ENDIF
        ADC &C237,Y
        STA &C100,X
        PHP
-       INY
-       INX
-       CPY #&03
+       JSR chunk_15
        BNE L859A
+       PLP
+       RTS
+;;
+.L85CB JSR chunk_15
+       BNE L85BB
+       PLP
+       LDY #&00
+       LDX &B2
+       CLC
+       PHP
+.L85D8 PLP
+       JSR chunk_25
+       PHP
+       JSR chunk_15
+       BNE L85D8
        PLP
        RTS
 ;;
@@ -1213,34 +1179,11 @@ ENDIF
        PHP
        LDY #&00
 .L85BB PLP
-       LDA &BFFD,X
-       ADC &C0FD,X
+       JSR chunk_24
        PHP
        CMP &C234,Y
        BEQ L85CB
        PLP
-       BRA L85EB
-;;
-.L85CB INX
-       INY
-       CPY #&03
-       BNE L85BB
-       PLP
-       LDY #&00
-       LDX &B2
-       CLC
-       PHP
-.L85D8 PLP
-       LDA &C0FD,X
-       ADC &C237,Y
-       STA &C0FD,X
-       PHP
-       INX
-       INY
-       CPY #&03
-       BNE L85D8
-       PLP
-       RTS
 ;;
 .L85EB LDA &C1FE
        CMP #&F6
@@ -1265,9 +1208,7 @@ ENDIF
        STA &C000,X
        LDA &C237,Y
        STA &C100,X
-       INX
-       INY
-       CPY #&03
+       JSR chunk_15
        BNE L8617
        LDA &C1FE
        ADC #&02
@@ -1288,12 +1229,10 @@ ENDIF
        ADC &C25D,Y
        STA &C25D,Y
        PHP
-       INY
-       INX
-       CPY #&03
+       JSR chunk_15
        BNE L8646
        PLP
-       JMP L863D
+       BRA L863D	; SAVING: 1 byte
 ;;
 .L865B LDX #&FF
        STX &B3
@@ -1338,9 +1277,7 @@ ENDIF
        ADC &C23D,Y
        STA &BFFD,X
        PHP
-       INX
-       INY
-       CPY #&03
+       JSR chunk_15
        BNE L86B6
        PLP
        LDY #&00
@@ -1352,9 +1289,7 @@ ENDIF
        SBC &C23D,Y
        STA &C0FD,X
        PHP
-       INX
-       INY
-       CPY #&03
+       JSR chunk_15
        BNE L86CE
        PLP
        RTS
@@ -1404,13 +1339,14 @@ ENDIF
        BNE L8737
        INC &B5
 .L8737 RTS
+
 ;;
 .L8738 JSR LA50D
        JSR L8D79
        LDY #&00
        STY &C2C0
-.L8743 LDA (&B4),Y
-       AND #&7F
+.L8743 
+       JSR lda_b4_y_and_7f
        CMP #&2E
        BEQ L8753
        CMP #&22
@@ -1432,8 +1368,7 @@ ENDIF
        EQUB &00
 ;;
 .L876D LDY #&09
-.L876F LDA (&B6),Y
-       AND #&7F
+.L876F JSR chunk_40
        STA &C262,Y
        DEY
        BPL L876F
@@ -1520,11 +1455,12 @@ ENDIF
        CMP #&2A
        BEQ L87D1
        BNE L87EB
+
 .L880C JSR LA50D
        JSR L93CC
        JSR LA714
-.L8815 LDY #&00
-       LDA (&B6),Y
+.L8815 
+       JSR ldy_0_lda_b6_y
        BEQ L882E
        JSR L8756
        BEQ L8830
@@ -1537,6 +1473,7 @@ ENDIF
        BNE L8815
 .L882E CMP #&0F
 .L8830 RTS
+
 ;;
 ;; Control block to load FSM
 .L8831 EQUB &01
@@ -1577,8 +1514,7 @@ ENDIF
        DEC A            ;; Convert 'A'-'H' to '0' to '7'
 .L885A PHA
 IF INCLUDE_FLOPPY
-       LDA &CD
-       AND #&20         ;; Hard drive present?
+       JSR chunk_38
        BNE L8865
        PLA              ;; No hard drive, reduce drive
        AND #&03         ;; number to 0-3
@@ -1593,6 +1529,7 @@ ENDIF
        RTS
 ;;
 .L886D JMP L8760
+
 ;;
 .L8870 JSR L8738
        BEQ L886D
@@ -1610,12 +1547,11 @@ ENDIF
        JSR L8847
        STA &C317
 .L8896 JSR L8731
-.L8899 LDX &C317
-       INX
+.L8899 LDX &C317        ;; Get current drive
+       INX              ;; If &FF, no directory loaded
        BNE L88AD
 IF INCLUDE_FLOPPY
-       LDA &CD          ;; Get ADFS status byte
-       AND #&20         ;; Hard drive present?
+       JSR chunk_38
        BEQ L88AA        ;; Jump if no hard drive
 ENDIF
        LDA &C2D8        ;; Get CMOS byte RAM copy
@@ -1623,17 +1559,14 @@ ENDIF
 .L88AA STA &C317        ;; Store in current drive
 .L88AD LDA #&10
        TSB &CD          ;; Flag FSM inconsistant
-       LDX #<L8831
-       LDY #>L8831
-       JSR L82AE        ;; Load FSM
+       JSR ldx_ldy_l8331_jsr_l82ae
        LDA #&10
        TRB &CD          ;; Flag FSM loaded
        LDA &C22E
        BPL L88CC
        LDY #&02
-.L88C3 LDA &C314,Y
-       STA &C22C,Y
-       DEY
+.L88C3 
+       JSR lda_c314_y_sta_c22c_y_dey
        BPL L88C3
 .L88CC LDY #>L883C
        LDX #<L883C
@@ -1661,8 +1594,8 @@ ENDIF
        STY &C2A2
        JSR L8743
        CMP #&2E
-       BNE L892F
-       JMP L8997
+       BNE RTS4
+       BRA L8997
 ;;
 .L8910 LDA #&24
        STA &C262
@@ -1675,20 +1608,19 @@ ENDIF
        LDA #&02
        STA &C2C0
        LDA #&00
+.RTS4
        RTS
 ;;
-.L892A JSR L880C
-       BEQ L893F
-.L892F RTS
-;;
 .L8930 LDX #&01
-       LDY #&03
-       LDA (&B6),Y
+       JSR ldy_3_lda_b6_y
        BPL L8939
        INX
 .L8939 STX &C2C0
        LDA #&00
        RTS
+;;
+.L892A JSR L880C
+       BNE RTS4
 ;;
 .L893F LDY #&00
 .L8941 JSR L8743
@@ -1701,22 +1633,20 @@ ENDIF
        INY
        BNE L8941
 .L8953 STY &C2A2
-.L8956 LDY #&03
-       LDA (&B6),Y
+.L8956 
+       JSR ldy_3_lda_b6_y
        BMI L897B
        JSR L8964
        BEQ L8956
 .L8961 LDA #&FF
        RTS
 ;;
-.L8964 CLC
-       LDA &B6
-       ADC #&1A
-       STA &B6
+.L8964
+       JSR clc_lda_b6_adc_1a_sta_b6
        BCC L896F
        INC &B7
-.L896F LDY #&00
-       LDA (&B6),Y
+.L896F 
+       JSR ldy_0_lda_b6_y
        BEQ L8961
        JSR L8756
        BNE L8964
@@ -1743,22 +1673,16 @@ ENDIF
        INC A
        BNE L89B4
        LDY #&02
-.L89AB LDA &C314,Y
-       STA &C22C,Y
-       DEY
+.L89AB 
+       JSR lda_c314_y_sta_c22c_y_dey
        BPL L89AB
 .L89B4 LDX #&0A
-.L89B6 LDA L883C,X
-       STA &C215,X
-       DEX
+.L89B6 JSR chunk_16
+
        BPL L89B6
        LDX #&02
        LDY #&16
-.L89C3 LDA (&B6),Y
-       STA &C21B,X
-       STA &C2FE,Y
-       INY
-       DEX
+.L89C3 JSR chunk_17
        BPL L89C3
        JSR L82AA
        JMP L88FD
@@ -1772,9 +1696,7 @@ ENDIF
        STA &C317
        LDA #&FF
        STA &C22F
-       LDX #<L8831
-       LDY #>L8831
-       JSR L82AE        ;; Load FSM
+       JSR ldx_ldy_l8331_jsr_l82ae
 .L89EF LDA &C22E
        CMP #&FF
        BEQ L8A22
@@ -1809,12 +1731,51 @@ ENDIF
        LDX &B8
        LDY &B9
        PLA
+.RTS6
 .L8A41 RTS
 ;;
 .L8A42 JSR L8A4A        ;; Do disk access
        BEQ L8A41        ;; No error, exit
        JMP L82BD        ;; Generate disk error
 ;;
+;; Workspace
+;; =========
+;; C000-FF Free Space Map sector 0
+;; C100-FF Free Space Map sector 1
+;; C200-FF Workspace
+;; C300-FF Workspace
+;; C400-FF Directory buffer
+;; C500-FF Directory buffer
+;; C600-FF Directory buffer
+;; C700-FF Directory buffer
+;; C800-FF Directory buffer
+;; C900-FF Random access buffer 1
+;; CA00-FF Random access buffer 2
+;; CB00-FF Random access buffer 3
+;; CC00-FF Random access buffer 4
+;; CD00-FF Random access buffer 5
+;;
+;; C200-14
+;; C215-23 SCSI control block
+;; C224-27
+;; C228-2B
+;; C22C-2F Current Selected Directory?
+;; C230-33
+;; C234-37 Current object sector
+;; C238-61
+;; C262-6B Current object name
+;;
+;; C300-09 Current directory name
+;; C30A-13 Current library name
+;; C314-17 Current directory sector
+;; C318-1B Library directory sector
+;; C31C-1F Previous directory sector
+;;  byte 0/1/2 = sector
+;;  byte 3     = drive*32, &FF=unset
+;;
+;; C3AC-B3 open channel flags
+
+
 ;;
 ;; User Disk Access
 ;; ================
@@ -1868,7 +1829,7 @@ ENDIF
        BEQ L8ABC        ;; Jump if remaining length<64k
 ;;
        JSR L80A2        ;; Do a transfer
-       BNE L8ACE        ;; Exit with any error
+       BNE RTS6         ;; Exit with any error
        LDA #&FF         ;; Update address
        CLC              ;; Addr=Addr+&0000FF00
        ADC &C217        ;; Addr1=Addr1+&FF
@@ -1897,6 +1858,15 @@ ENDIF
        DEC &C223        ;; Length3=Length3-1
 .L8AB7 DEC &C222        ;; Length2=Length2-1
        BRA L8A71        ;; Loop back for another &FF00 bytes
+
+.lsr_a_4
+       LSR A
+       LSR A
+       LSR A
+       LSR A
+.RTS7
+       RTS
+
 ;;
 ;; There is now less than 64k to transfer
 ;; --------------------------------------
@@ -1904,11 +1874,11 @@ ENDIF
        BEQ L8AC9        ;; Now less than 256 bytes to go
        STA &C21E        ;; Set Sector Count
        JSR L80A2        ;; Do this transfer
-       BNE L8ACE        ;; Exit with any error
+       BNE RTS7         ;; Exit with any error
 ;;
 .L8AC9 LDA &C220        ;; Get Length0
-       BNE L8ACF        ;; Jump to deal with any leftover bytes
-.L8ACE RTS
+       BEQ RTS7         
+       			;; Deal with any leftover bytes
 ;;
 ;; There are now less than 256 bytes left, must be reading
 ;; -------------------------------------------------------
@@ -1932,7 +1902,7 @@ ENDIF
 .L8AFA JSR L8328        ;; Wait for ensuring to finish
        JSR L8099        ;; Initialise retries
 .L8B00 JSR L8B09        ;; Call to load data
-       BEQ L8ACE        ;; All ok, so exit
+       BEQ RTS7         ;; All ok, so exit
        DEC &CE          ;; Decrement retries
        BPL L8B00        ;; Loop to try again
 ;;                                         Fall through to try once more
@@ -1948,8 +1918,7 @@ ENDIF
        STA &C21B        ;; Store back into control block
        STA &C333
 IF INCLUDE_FLOPPY
-       LDA &CD          ;; Get options
-       AND #&20         ;; Hard drive present?
+       JSR chunk_38
        BNE L8B4F        ;; Jump ahead if so
 .L8B2C LDA &C21B
        ORA &C317
@@ -1964,7 +1933,7 @@ IF INCLUDE_FLOPPY
        LSR A
        LSR A
        ADC #&C9
-       JMP LBA4E
+       JMP LBB57	;; SAVING: 3 bytes
 ENDIF
 ;;
 ;; Get bytes from a partial sector from a hard drive
@@ -1973,7 +1942,10 @@ ENDIF
 IF INCLUDE_FLOPPY
        BMI L8B2C        ;; Jump back with floppies
 ENDIF
+IF PATCH_IDE OR PATCH_SD
+ELSE
        JSR L807E        ;; Set SCSI to command mode
+ENDIF
        LDA &C216
        STA &B2
        LDA &C217
@@ -2001,11 +1973,6 @@ ELIF PATCH_IDE
        JSR SetGeometry ;; Pass sector address to IDE
        JSR SetSector
        PLX
-       NOP
-       NOP
-       NOP
-       NOP
-       NOP
 ELSE
        LDY #&00
 .L8B81 LDA &C21A,Y
@@ -2029,9 +1996,9 @@ IF PATCH_SD
        PHX
        JSR MMC_ReadX
        PLA
-	   EOR #&FF         ;; Calculate 256 - bytecount
-	   TAY
-	   INY
+       EOR #&FF         ;; Calculate 256 - bytecount
+       TAY
+       INY
        JSR MMC_Clocks	;; ignore rest of sector
        JSR MMC_Clocks	;; twice, as sectors are stretched to 512 bytes
        JSR MMC_16Clocks	;; ignore CRC
@@ -2061,14 +2028,14 @@ ENDIF
        BNE L8BD2
 .L8BC5 JSR L8964
        BNE L8BD2
-.L8BCA LDY #&03
-       LDA (&B6),Y
+.L8BCA 
+       JSR ldy_3_lda_b6_y
        BMI L8BC5
 .L8BD0 LDA #&00
 .L8BD2 RTS
 ;;
-.L8BD3 LDY #&00
-       LDA (&B4),Y
+.L8BD3 
+       jsr ldy_0_lda_b4_y
        CMP #&5E
        BNE L8BDE
 .L8BDB JMP L8760
@@ -2084,8 +2051,7 @@ ENDIF
 ;; ========================================
 .L8BF0 JSR L8FE8        ;; Search for object
        BNE L8BD2        ;; Not found, return NE
-       LDY #&04
-       LDA (&B6),Y      ;; Check 'E' bit
+       JSR chunk_26
        BPL L8BD0        ;; Not 'E', return EQ for found
 .L8BFB JSR L836B        ;; Error 'Access violation'
        EQUB &BD         ;; ERR=189
@@ -2095,8 +2061,7 @@ ENDIF
 ;; =================
 .L8C10 JSR L8BBE
        BNE L8BD3
-       LDY #&00
-       LDA (&B6),Y
+       JSR ldy_0_lda_b6_y
        BPL L8BFB
 .L8C1B LDY #&06
        LDA (&B8),Y
@@ -2111,9 +2076,7 @@ ENDIF
 .L8C2E LDX #&04
        LDY #&0D
 .L8C32 LDA (&B6),Y
-       STA &C215,X
-       DEY
-       DEX
+       JSR chunk_27
        BNE L8C32
 .L8C3B LDA #&01
        STA &C215        ;; Set flag byte to 1
@@ -2146,9 +2109,7 @@ ENDIF
 .L8C70 LDY #&15         ;; Top byte of length
        LDX #&0B         ;; 11+1 bytes to copy
 .L8C74 LDA (&B6),Y      ;; Copy length/exec/load
-       STA &C215,X      ;;  to workspace
-       DEY
-       DEX
+       JSR chunk_27
        BPL L8C74        ;; Loop for 12 bytes
        LDY #&0D
        LDX #&0B
@@ -2165,9 +2126,7 @@ IF PATCH_FULL_ACCESS
        DEY
        DEY
 .RdNotE
-       LDA (&B6),Y
-       ASL A
-       ROL &C22B
+       JSR chunk_28
        CPY #4
        BEQ RdIsE
        CPY #2
@@ -2185,15 +2144,11 @@ IF PATCH_FULL_ACCESS
        LDY #&0E
        STA (&B8),Y
        RTS
-       NOP
-       NOP
 ELSE
        LDA #&00
        STA &C22B        ;; Clear byte for access
        LDY #&02         ;; Point to 'L' bit
-.L8C91 LDA (&B6),Y
-       ASL A
-       ROL &C22B        ;; Copy LWR into &C22B
+.L8C91 JSR chunk_28
        DEY
        BPL L8C91
        LDA &C22B        ;; A=00000LWR
@@ -2205,30 +2160,25 @@ ELSE
        PLP              ;; Get 'L'
        ROR A            ;; A=L0WR0000
        STA &C22B        ;; Store back in workspace
-       LSR A
-       LSR A
-       LSR A
-       LSR A            ;; A=0000L0WR
+       JSR lsr_a_4
        ORA &C22B        ;; A=L0WRL0WR
        LDY #&0E
        STA (&B8),Y      ;; Store access byte in control block
        RTS
 ENDIF
+
 ;;
 ;; OSFILE &05 - Read Info
 ;; ======================
 ;; &B8/9=>control block, &B4/5=>filename
 ;;
-.L8CB3 LDY #&00         ;; Copy filename address again
-       LDA (&B8),Y
-       STA &B4
-       INY
-       LDA (&B8),Y
-       STA &B5
+.L8CB3 
+
+       JSR chunk_5
+
        JSR L8FE8        ;; Search for object
        BNE L8CD1
-       LDY #&04
-       LDA (&B6),Y      ;; Get 'E' bit
+       JSR chunk_26
        BPL L8CCE        ;; 'E' not set, jump
        LDA #&FF         ;; 'E' set, filetype &FF
 IF PATCH_FULL_ACCESS
@@ -2240,12 +2190,9 @@ ENDIF
 .L8CCE JSR L8C70
 .L8CD1 JMP L89D5
 ;;
-.L8CD4 LDY #&00
-       LDA (&B8),Y
-       STA &B4
-       INY
-       LDA (&B8),Y
-       STA &B5
+.L8CD4 
+
+       JSR chunk_5
        JSR L8DC8
        JSR L8FE8
        BEQ L8CEC
@@ -2273,8 +2220,8 @@ ENDIF
 .L8D0F LDA #&11
        RTS
 ;;
-.L8D12 LDY #&03
-       LDA (&B6),Y
+.L8D12 
+       JSR ldy_3_lda_b6_y
        BPL L8D1B
        JMP L95AB
 ;;
@@ -2289,9 +2236,7 @@ ENDIF
 .L8D2C LDX #&09
 .L8D2E LDA &C3AC,X
        BEQ L8D74
-       LDA &C3B6,X
-       AND #&E0
-       CMP &C317
+       JSR chunk_8
        BNE L8D74
        LDA &C3E8,X
        CMP &C314
@@ -2359,8 +2304,8 @@ ENDIF
        INY
        BNE L8DB6
 .L8DC8 JSR L8D79
-.L8DCB LDA (&B4),Y
-       AND #&7F
+.L8DCB 
+       JSR lda_b4_y_and_7f
        CMP #&2A
        BEQ L8DE9
        CMP #&23
@@ -2377,7 +2322,7 @@ ENDIF
 .L8DE6 JMP L8760
 ;;
 .L8DE9 JSR L836B
-       EQUB &Fd         ;; ERR=194
+       EQUB &FD         ;; ERR=253
        EQUS "Wild cards"
        EQUB &00
 ;;
@@ -2386,14 +2331,8 @@ ENDIF
 .L8DFE JSR L8CF4
 .L8E01 BNE L8E24
        LDX #&02
-       LDY #&12
-       LDA (&B6),Y
-       CMP #&01
-.L8E0B INY
-       LDA #&00
-       ADC (&B6),Y
-       STA &C224,Y
-       DEX
+       JSR chunk_29
+.L8E0B JSR chunk_30
        BPL L8E0B
        LDY #&18
        LDX #&02
@@ -2437,7 +2376,7 @@ ENDIF
        BNE L8E6A
        DEC &B5
 .L8E6A DEC &B4
-       JMP L8E54
+       BRA L8E54	; SAVING: 1 byte
 ;;
 .L8E6F LDA &C227
        STA &B4
@@ -2446,8 +2385,8 @@ ENDIF
        RTS
 ;;
 .L8E7A LDY #&09
-.L8E7C LDA (&B4),Y
-       AND #&7F
+.L8E7C 
+       JSR lda_b4_y_and_7f
        CMP #&21
        BCC L8E88
        CMP #&22
@@ -2485,21 +2424,15 @@ ENDIF
        PHA
        LDA &B7
        PHA
-.L8EC3 LDA #&05
-       STA &B6
-       LDA #&C4
-       STA &B7
-.L8ECB LDY #&00
-       LDA (&B6),Y
+.L8EC3 JSR chunk_42
+.L8ECB 
+       JSR ldy_0_lda_b6_y
        BEQ L8EF8
        LDY #&19
        LDA (&B6),Y
        CMP &C8FA
        BEQ L8EE7
-       CLC
-       LDA &B6
-       ADC #&1A
-       STA &B6
+       JSR clc_lda_b6_adc_1a_sta_b6
        BCC L8ECB
        INC &B7
        BCS L8ECB
@@ -2510,7 +2443,7 @@ ENDIF
        CLD
        STA &C8FA
        STA &C400
-       JMP L8EC3
+       BRA L8EC3
 ;;
 .L8EF8 PLA
        STA &B7
@@ -2528,19 +2461,15 @@ ENDIF
        BNE L8F0C
        LDA #&0A
        STA &C21A
-       LDA #&00
-       STA &C21E
-       LDA #&00
-       STA &C21F
+       STZ &C21E
+       STZ &C21F
        LDY #&12
 .L8F26 LDA (&B6),Y
        STA &C20E,Y
        INY
        CPY #&16
        BNE L8F26
-       LDY #&12
-       LDA (&B6),Y
-       CMP #&01
+       JSR chunk_29
        LDX #&02
 .L8F38 LDA #&00
        INY
@@ -2560,8 +2489,7 @@ ENDIF
        STA (&B6),Y
        JMP L84E1
 ;;
-.L8F57 JSR L8DFE
-       JSR L8E7A
+.L8F57 JSR chunk_31
 .L8F5D JSR L8E96
        JSR L865B
 .L8F63 LDY #&18
@@ -2582,30 +2510,24 @@ ENDIF
 ;;
 .L8F7F JSR L8F57
        JSR L8A42
-       JMP L8F8B
+       BRA L8F8B
 ;;
 .L8F88 JSR L8F57
 .L8F8B JSR L8F91
        JMP L8C67
+
 ;;
 .L8F91 JSR LA714
        JSR L9012
        LDX #&0A
-.L8F99 LDA L883C,X
-       STA &C215,X
-       DEX
+.L8F99 JSR chunk_16
        BPL L8F99
        LDA #&0A
-       STA &C21A
-       LDA &C314
-       STA &C21D
-       LDA &C315
-       STA &C21C
-       LDA &C316
-       STA &C21B
+
+       JSR chunk_3
+
        JSR L82AA
-       LDA &C317
-       JSR LB5C5        ;; X=(A DIV 16)
+       JSR chunk_12
        LDA &C1FC
        STA &C322,X
        LDA &FE44        ;; System VIA Latch Lo
@@ -2634,8 +2556,6 @@ ENDIF
 ;; ================================
 IF PATCH_IDE
 .L8FF3 RTS              ;; Bodge 'Bad FS map' check
-       EQUB <L9012      ;; Junk - so a binary compare will pass
-       EQUB >L9012      ;; Junk - so a binary compare will pass
 ELSE
 .L8FF3 JSR L9012        ;; Check for overlapping FSM entries
 ENDIF
@@ -2653,25 +2573,31 @@ ENDIF
 ;; -----------------------------------------------------
 .L9012 LDX &C1FE        ;; Get pointer to end of FSM
        BEQ L8FF2        ;; Pointer=0, disk completely full, exit
+IF NOT(LARGE_DISK)
        LDA #&00         ;; Seed the sum with zero
-.L9019 ORA &BFFF,X      ;; Merge with high byte of final free space
+ENDIF
+.L9019
+IF NOT(LARGE_DISK)
+       ORA &BFFF,X      ;; Merge with high byte of final free space
        ORA &C0FF,X      ;; Merge with high byte of final length
+ENDIF
+       DEX              ;; Check FSM end pointer is multiple of 3
+       BEQ L9003        ;; Jump to error if end pointer 3n+2
        DEX
-       BEQ L9003        ;; Give error if end pointer not *3
+       BEQ L9003        ;; Jump to error if end pointer 3n+1
        DEX
-       BEQ L9003        ;; Give error if end pointer not *3
-       DEX
-       BNE L9019        ;; Multiple of three, check net entry
+       BNE L9019        ;; Multiple of three, check next entry
+IF NOT(LARGE_DISK)
        AND #&E0         ;; Get "drive" bits
        BNE L9003        ;; If any set, map entry too big
+ENDIF
        LDX &C1FE        ;; Get pointer to end of FSM
        CPX #&06         ;; Are there two or more entries?
        BCC L8FF2        ;; Exit if only one FSM entry
        LDX #&03         ;; Point to first entry minus 3
 .L9035 LDY #&02         ;; Three bytes per entry
        CLC              ;; Clear carry
-.L9038 LDA &BFFD,X      ;; Get FSM entry start sector
-       ADC &C0FD,X      ;; Add FSM entry length
+.L9038 JSR chunk_24
        PHA              ;; Save byte
        INX              ;; Point to next byte
        DEY
@@ -2733,7 +2659,7 @@ ENDIF
 ;; ===========================
 .L9085 STA &C223        ;; Save function
 IF PATCH_FULL_ACCESS
-       JSR L8FE8
+       JSR L8FE8        ;; Search for object
 ELSE
        JSR L8BF0        ;; Search for non-'E' object
 ENDIF
@@ -2750,9 +2676,7 @@ ENDIF
        LDY #&05
        LDX #&03
 .L909B LDA (&B8),Y
-       STA &C215,X
-       DEY
-       DEX
+       JSR chunk_27
        BPL L909B
        LDY #&0D
        LDX #&03
@@ -2767,9 +2691,7 @@ ENDIF
 .L90B8 LDY #&09
        LDX #&03
 .L90BC LDA (&B8),Y
-       STA &C215,X
-       DEY
-       DEX
+       JSR chunk_27
        BPL L90BC
        LDY #&11
        LDX #&03
@@ -2793,9 +2715,7 @@ IF PATCH_FULL_ACCESS
         DEY
         DEY
 .WrNotE
-        LDA (&B6),Y
-        ASL A
-        ROL &C22B
+        JSR chunk_28
         ROR A
         STA (&B6),Y
         CPY #4
@@ -2811,12 +2731,8 @@ IF PATCH_FULL_ACCESS
 .WrNext
         DEY
         BPL WrLp
-        NOP
-        NOP
-        NOP
 ELSE
-       LDY #&03
-       LDA (&B6),Y      ;; Check 'D' bit
+       JSR ldy_3_lda_b6_y
        BPL L90F2        ;; Jump if a file
        LSR &C22B
        LSR &C22B
@@ -2849,41 +2765,32 @@ ENDIF
        BEQ L90D8
        LDA #&00
        RTS
+
 ;;
        JSR LA50D
-       LDA &B4
-       STA &C240
-       LDA &B5
-       STA &C241
-       LDA #&40
-       STA &B8
-       LDA #&C2
-       STA &B9
+       JSR chunk_9
+
 .L9127 JSR L8CD4
        BEQ L9131
        LDA #&00
        JMP L89D8
+
 ;;
 .L9131 JSR L8D1B
-       LDY #&03
-       LDA (&B6),Y
+       JSR ldy_3_lda_b6_y
        BPL L9177
        LDY #&03
 .L913C LDA &C22C,Y
        STA &C230,Y
        DEY
        BPL L913C
-       LDA #&FF
-       STA &C22E
-       STA &C22F
+       JSR chunk_10
        JSR L9486
        LDA &C405
        PHP
        JSR L89D8
        LDY #&03
-.L9159 LDA &C230,Y
-       STA &C22C,Y
-       DEY
+.L9159 JSR chunk_32
        BPL L9159
        PLP
        BEQ L9177
@@ -2892,15 +2799,10 @@ ENDIF
        EQUS "Dir not empty"
        EQUB &00
 ;;
-.L9177 LDY #&12
+.L9177 
        LDX #&02
-       LDA (&B6),Y
-       CMP #&01
-.L917F INY
-       LDA #&00
-       ADC (&B6),Y
-       STA &C224,Y
-       DEX
+       JSR chunk_29
+.L917F JSR chunk_30
        BPL L917F
        LDY #&18
        LDX #&02
@@ -2909,55 +2811,52 @@ ENDIF
        DEY
        DEX
        BPL L918E
-       LDY #&03
-       LDA (&B6),Y
+       JSR ldy_3_lda_b6_y
        BPL L921B
-       LDX &C22F
+       LDX &C22F	;; Get object drive
        CPX #&FF
-       BEQ L91A9
-       CPX &C317
-       BNE L91CB
+       BEQ L91A9	;; Drive=&FF
+       CPX &C317	;; Compare with current drive
+       BNE L91CB	;; Not on current drive, can't be CSD
 .L91A9 LDX #&02
-.L91AB LDA &C234,X
-       CMP &C22C,X
-       BNE L91CB
+.L91AB LDA &C234,X	;; Get object sector
+       CMP &C22C,X	;; Compare with CSD sector
+       BNE L91CB	;; No match, jump to check for LIB
        DEX
        BPL L91AB
-       JSR L836B
+       JSR L836B	;; Object is CSD, can't delete it
        EQUB &96         ;; ERR=150
        EQUS "Can't delete CSD"
        EQUB &00
 ;;
-.L91CB LDA &C317
-       CMP &C31B
-       BNE L91F9
+.L91CB LDA &C317	;; Get current drive
+       CMP &C31B	;; Compare with LIB drive
+       BNE L91F9	;; Not on current drive
        LDX #&02
-.L91D5 LDA &C234,X
-       CMP &C318,X
-       BNE L91F9
+.L91D5 LDA &C234,X	;; Get object sector
+       CMP &C318,X	;; Compare with LIB sector
+       BNE L91F9	;; No match, jump to ch
        DEX
        BPL L91D5
-       JSR L836B
+       JSR L836B	;; Object is LIB, can't delete it
        EQUB &97         ;; ERR=151
        EQUS "Can't delete Library"
        EQUB &00
 ;;
-.L91F9 LDA &C317
-       CMP &C31F
-       BNE L921B
+.L91F9 LDA &C317	;; Get current drive
+       CMP &C31F	;; Compare with Previous drive
+       BNE L921B	;; Different drive
        LDX #&02
-.L9203 LDA &C234,X
-       CMP &C31C,X
-       BNE L921B
+.L9203 LDA &C234,X	;; Get object sector
+       CMP &C31C,X	;; Compare with Previous Directory sector
+       BNE L921B	;; No match, jump to exit
        DEX
        BPL L9203
        LDA #&02
-       STA &C31C
-       LDA #&00
-       STA &C31D
-       STA &C31E
-.L921B LDY #&04
-       LDA (&B6),Y
+       STA &C31C	;; Set Previous Directory to $
+       STZ &C31D
+       STZ &C31E
+.L921B JSR chunk_26
        BMI L9224
        JSR L8C70
 .L9224 LDY #&1A
@@ -2987,7 +2886,6 @@ ENDIF
        TAY              ;; Y=function                  Unsupported should return A preserved:
 ;;                                                                     NOP
 IF PATCH_UNSUPPORTED_OSFILE
-       NOP              ;; Unsupported OSFILE returns A preserved
        CLR &C2D5
        ASL A
        TAX
@@ -3008,12 +2906,9 @@ ENDIF
        LDA L9271,X
        PHA
        PHY              ;; Stack function
-       LDY #&00         ;; Get filename address
-       LDA (&B8),Y
-       STA &B4
-       INY
-       LDA (&B8),Y
-       STA &B5          ;; &B4/5=>filename
+
+       JSR chunk_5
+
        PLA              ;; Get function to A
 .L9270 RTS              ;; Jump to subroutine
 ;;
@@ -3041,8 +2936,7 @@ ENDIF
        LDX #&0C
 ;;
 .L928F LDY #&00
-.L9291 LDA (&B6),Y
-       AND #&7F
+.L9291 JSR chunk_40
        CMP #&20
        BCC L92A1
        JSR L92CB
@@ -3116,7 +3010,7 @@ ENDIF
 .L9300 DEX              ;; Dec. padding needed
        BMI L9309        ;; All done
        JSR LA036        ;; Print a space
-       JMP L9300        ;; Loop to print padding
+       BRA L9300        ;; Loop to print padding SAVING: 1 byte
 ;;
 .L9309 LDA #&28
        JSR LA03C        ;; Print '('
@@ -3127,15 +3021,12 @@ ENDIF
        JSR LA03C        ;; Print ')'
        JMP LA036        ;; Finish with a space
 ;;
-;; Access bits
-;; ===========
+;; Access characters
+;; =================
 .L931D EQUS "RWLDE"
 ;;
 .L9322 PHA
-       LSR A
-       LSR A
-       LSR A
-       LSR A
+       JSR lsr_a_4
        JSR L932B
        PLA
 .L932B JSR L8462
@@ -3182,8 +3073,7 @@ ENDIF
        JSR L928F
        JSR L92A8
        EQUS ")",&0D,"Dir.",&A0
-       LDA #&00
-       STA &B6
+       STZ &B6
        LDA #&C3
        STA &B7
        LDX #&0A
@@ -3198,11 +3088,7 @@ ENDIF
        JSR L928F
        JSR L92A8
        EQUB &0D,&8D
-.L93CC LDA #&05
-       STA &B6
-       LDA #&C4
-       STA &B7
-       RTS
+.L93CC JMP chunk_42
 ;;
 ;; FSC 5 - *CAT
 ;; ============
@@ -3211,8 +3097,8 @@ ENDIF
 .L93DB JSR L9331
        LDA #&04
        STA &C22B
-.L93E3 LDY #&00
-       LDA (&B6),Y
+.L93E3 
+       JSR ldy_0_lda_b6_y
        BEQ L940C
        JSR L92E5
        DEC &C22B
@@ -3220,13 +3106,11 @@ ENDIF
        LDA #&04
        STA &C22B
        JSR LA03A
-       JMP L93FF
+       BRA L93FF	; SAVING: 1 byte
 ;;
 .L93FC JSR LA036
-.L93FF CLC
-       LDA &B6
-       ADC #&1A
-       STA &B6
+.L93FF 
+       JSR clc_lda_b6_adc_1a_sta_b6
        BCC L93E3
        INC &B7
        BCS L93E3
@@ -3252,20 +3136,17 @@ ENDIF
 ;; =============
 .L943A JSR L9478
 .L943D JSR L9331
-.L9440 LDY #&00
-       LDA (&B6),Y
+.L9440 
+       JSR ldy_0_lda_b6_y
        BEQ L9423
        JSR L9508
-       CLC
-       LDA &B6
-       ADC #&1A
-       STA &B6
+       JSR clc_lda_b6_adc_1a_sta_b6
        BCC L9440
        INC &B7
        BRA L9440
 ;;
-.L9456 LDY #&00
-       LDA (&B4),Y
+.L9456 
+       jsr ldy_0_lda_b4_y
        AND #&7F
        CMP #&5E
        BNE L946A
@@ -3281,19 +3162,20 @@ ENDIF
        LDA #&C2
        STA &B7
 .L9476 TYA
+.RTS9
 .L9477 RTS
 ;;
-.L9478 LDY #&00
-       LDA (&B4),Y
+.L9478 
+       jsr ldy_0_lda_b4_y
        CMP #&21
        BCS L9486
-       LDX &C317
-       INX
+       LDX &C317        ;; Get current drive
+       INX              ;; If &FF, no directory loaded
        BNE L9477
 .L9486 JSR L8875
        BNE L9499
-.L948B LDY #&03
-       LDA (&B6),Y
+.L948B 
+       JSR ldy_3_lda_b6_y
        BMI L949E
        JSR L8964
        BEQ L948B
@@ -3305,26 +3187,19 @@ ENDIF
        INY
        BNE L94AF
        LDY #&02
-.L94A6 LDA &C314,Y
-       STA &C22C,Y
-       DEY
+.L94A6 
+       JSR lda_c314_y_sta_c22c_y_dey
        BPL L94A6
 .L94AF LDX #&0A
-.L94B1 LDA L883C,X
-       STA &C215,X
-       DEX
+.L94B1 JSR chunk_16
        BPL L94B1
        LDX #&02
        LDY #&16
-.L94BE LDA (&B6),Y
-       STA &C21B,X
-       STA &C2FE,Y
-       INY
-       DEX
+.L94BE JSR chunk_17
        BPL L94BE
        LDA &B7
        CMP #&94
-       BEQ L9507
+       BEQ RTS9
        JMP L82AA
 ;;
 ;; Fake entry for '$'
@@ -3367,39 +3242,58 @@ ENDIF
        JSR L8964
        BEQ L94F6
        JMP L89D8
+
+.lda_b4_y_and_7f
+       LDA (&B4),Y
+       AND #&7F
+.RTS8
+       RTS
+
 ;;
 .L9501 LDA &CD
        AND #&04
-       BNE L9508
-.L9507 RTS
-;;
+       BEQ RTS8
+
+; *INFO - Print full info on an entry
+; -----------------------------------
 .L9508 JSR L92E5        ;; Print filename
        JSR LA03C        ;; Print another space
+;
+IF NOT(PATCH_INFO)
        LDY #&04
        LDA (&B6),Y      ;; Get 'E' bit
-IF PATCH_INFO
-       NOP
-       NOP
-ELSE
-       BMI L9543        ;; If 'E' set, jump to finish      NOP:NOP
+       BMI L9543        ;; If 'E' set, jump to finish
+       DEY
+       LDA (&B6),Y      ;; Get 'D' bit
+       ROL A            ;; Rotate into Carry
+       LDX #&0A         ;; X=10, Y=13
+       LDY #&0D
+       BCC L9522        ;; Jump if file
+       LDX #&17         ;; X=23, Y=24 if directory
+       LDY #&18         ;; Just print sector start
 ENDIF
+;
+IF PATCH_INFO AND KEEP_REDUNDANT
+       NOP
+       NOP
        DEY
        LDA (&B6),Y      ;; Get 'D' bit
        ROL A            ;; Rotate into Carry
        LDX #&0A         ;; X=10, Y-13 if file
        LDY #&0D
-IF PATCH_INFO
        BRA L9522
-ELSE
-       BCC L9522        ;; Jump if file                    BRA L9522
-ENDIF
        LDX #&17         ;; X=23, Y=24 if directory
        LDY #&18         ;; Just print sector start
-;;
+ENDIF
+;
+IF PATCH_INFO AND NOT(KEEP_REDUNDANT)
+       LDX #&0A         ;; X=display column 10
+       LDY #&0D         ;; Y=offset to top byte of load address
+ENDIF
 .L9522 CPX #&16
-       BEQ L952B
-       LDA (&B6),Y
-       JSR L9322
+       BEQ L952B        ;; Finish at display column 22
+       LDA (&B6),Y	;; Get load/exec/len/sec byte
+       JSR L9322	;; Print it
 .L952B TXA
        AND #&03
        CMP #&01
@@ -3432,9 +3326,7 @@ ENDIF
        STA &C31C,Y
        DEY
        BPL L9563
-       LDA #&FF
-       STA &C22E
-       STA &C22F
+       JSR chunk_10
        JMP L89D8
 ;;
 .L9577 LDA #&FF
@@ -3445,28 +3337,18 @@ ENDIF
        STA &C242,X
        DEX
        BPL L9580
-       LDA &B4
-       STA &C240
-       LDA &B5
-       STA &C241
-       LDA #&40
-       STA &B8
-       LDA #&C2
-       STA &B9
+       JSR chunk_9
        JSR L8DFE
        LDY #&09
-       LDA &C237
-       ORA &C238
-       ORA &C239
+       JSR chunk_23
        BEQ L95BE
 .L95AB JSR L836B
        EQUB &C4         ;; ERR=196
        EQUS "Already exists"
        EQUB &00
 ;;
-.L95BE LDA (&B4),Y
-       AND #&7F
-       CMP #&22
+
+.L95BE JSR chunk_33
        BEQ L95CA
        CMP #&21
        BCS L95CC
@@ -3476,16 +3358,13 @@ ENDIF
        BPL L95BE
        JSR L8F5D
        LDY #&03
-.L95D6 LDA (&B6),Y
-       ORA #&80
-       STA (&B6),Y
+.L95D6 
+       JSR lda_b6_y_ora_80_sta_b6_y
        DEY
        CPY #&01
        BNE L95D6
        DEY
-       LDA (&B6),Y
-       ORA #&80
-       STA (&B6),Y
+       JSR lda_b6_y_ora_80_sta_b6_y
        LDA #&00
        TAX
        TAY
@@ -3505,9 +3384,7 @@ ENDIF
        DEX
        BPL L9600
        LDX #&00
-.L9614 LDA (&B4),Y
-       AND #&7F
-       CMP #&22
+.L9614 JSR chunk_33
        BEQ L9620
        CMP #&21
        BCS L9622
@@ -3540,6 +3417,12 @@ ENDIF
        EQUB &FF
        EQUB &FF
 ;;
+
+.ldy_3_lda_b6_y
+       LDY #&03
+       LDA (&B6),Y
+.RTS10
+       RTS
 .L9649 LDA &C22F
        CMP &C317
        BEQ L9654
@@ -3553,8 +3436,7 @@ ENDIF
        BPL L9656
        LDY #&02
 .L9663 LDA &C2A8,Y
-       STA &C22C,Y
-       DEY
+       jsr sta_c22c_y_dey
        BPL L9663
 .L966C LDA &C31B
        CMP &C317
@@ -3592,8 +3474,7 @@ ENDIF
 .L96B8 LDA &C2A7
        ORA &C2A6
        ORA &C2A5
-       BNE L96C4
-       RTS
+       BEQ RTS10
 ;;
 .L96C4 LDA &C2A7
        ORA &C2A6
@@ -3666,37 +3547,39 @@ ENDIF
        BNE L9780
        INC &C2AA
 .L9780 JMP L96EC
+
+.ldy_0_lda_b4_y
+       LDY #&00
+       LDA (&B4),Y
+.RTS11
+       RTS
+
 ;;
 .L9783 LDA &CD
        AND #&08
-       BEQ L978A
-       RTS
+       BNE RTS11
 ;;
 .L978A LDA #&C4
        STA &C217
        LDA #&08
-       STA &C21A
-       LDA &C314
-       STA &C21D
-       LDA &C315
-       STA &C21C
-       LDA &C316
-       STA &C21B
+
+       JSR chunk_3
+
        LDA #&05
        STA &C21E
        JMP L82AE
 ;;
-.L97AE LDA #&00
-       STA &C2AB
-       STA &C2AC
-       STA &C2AD
+.L97AE 
+       STZ &C2AB
+       STZ &C2AC
+       STZ &C2AD
 .L97B9 LDA #&FF
        STA &C2A2
        STA &C2A3
        STA &C2A4
        JSR L93CC
-.L97C7 LDY #&00
-       LDA (&B6),Y
+.L97C7 
+       JSR ldy_0_lda_b6_y
        BNE L97DC
        LDA &C2A2
        AND &C2A3
@@ -3734,10 +3617,8 @@ ENDIF
        STA &B4
        LDA &B7
        STA &B5
-.L9811 LDA &B6
-       CLC
-       ADC #&1A
-       STA &B6
+.L9811 
+       JSR clc_lda_b6_adc_1a_sta_b6
        BCC L97C7
        INC &B7
        BCS L97C7
@@ -3753,8 +3634,7 @@ ENDIF
        LDX #&00
        STX &B2
 .L9835 CPX &C1FE
-       BCC L983D
-       JMP L97B9
+       BCS L97B9
 ;;
 .L983D INX
        INX
@@ -3786,15 +3666,11 @@ ENDIF
        PLP
 .L986E JMP L97B9
 ;;
-.L9871 INX
-       INY
-       CPY #&03
+.L9871 JSR chunk_15
        BNE L9860
        PLP
        LDX #&02
-       LDY #&12
-       LDA (&B6),Y
-       CMP #&01
+       JSR chunk_29
 .L9880 INY
        LDA (&B6),Y
        ADC #&00
@@ -3818,10 +3694,10 @@ ENDIF
        JSR L9649
        JMP L97AE
 ;;
-.L98B3 LDA #&00
-       STA &C0
-       STA &C253
-       STA &C254
+.L98B3
+       STZ &C0
+       STZ &C253
+       STZ &C254
        LDA #&02
        STA &C252
        LDA #&CD
@@ -3838,11 +3714,10 @@ ENDIF
        BPL L98D3
        JSR L97AE
        JSR L93CC
-.L98E2 LDY #&00
-       LDA (&B6),Y
+.L98E2 
+       JSR ldy_0_lda_b6_y
        BEQ L9913
-       LDY #&03
-       LDA (&B6),Y
+       JSR ldy_3_lda_b6_y
        BPL L9930
        LDA &C0
        CMP #&FE
@@ -3876,10 +3751,8 @@ ENDIF
        DEC &C0
        LDA (&C0),Y
        STA &B6
-.L9930 CLC
-       LDA &B6
-       ADC #&1A
-       STA &B6
+.L9930 
+       JSR clc_lda_b6_adc_1a_sta_b6
        BCC L98E2
        INC &B7
        BRA L98E2
@@ -3896,16 +3769,14 @@ ENDIF
        JMP L8BD3        ;; Jump to 'Not found'/'Bad name'
 ;;
 .L994A LDY #&02         ;; Clear existing LWR bits
-.L994C LDA (&B6),Y
-       AND #&7F
+.L994C JSR chunk_40
        STA (&B6),Y
        DEY
        BPL L994C
        RTS
 ;;
 .L9956 JSR L994A        ;; Clear existing LWR bits
-       LDY #&04
-       LDA (&B6),Y      ;; Get existing 'E' bit
+       JSR chunk_26
        BMI L996A        ;; Jump if 'E' file
        DEY
        LDA (&B6),Y      ;; Get 'D' bit
@@ -3916,16 +3787,14 @@ ENDIF
 ;;
 .L996A STA &C22B        ;; Store 'E' or 'D'+'R' bit
        LDY #&00         ;; Step past filename
-.L996F LDA (&B4),Y
-       CMP #&20
+.L996F JSR chunk_43
        BCC L99C0
        BEQ L997E
        CMP #&22
        BEQ L997E
        INY
        BNE L996F
-.L997E LDA (&B4),Y
-       CMP #&20
+.L997E JSR chunk_43
        BCC L99C0
        BEQ L998A
        CMP #&22
@@ -3941,9 +3810,7 @@ ENDIF
        BNE L99AA        ;; Jump past if not setting 'E'
        JSR L994A        ;; Clear all other bits
        LDY #&04
-       LDA (&B6),Y
-       ORA #&80
-       STA (&B6),Y      ;; Set 'E' bit
+       JSR lda_b6_y_ora_80_sta_b6_y
        STA &C22B        ;; Set 'E'/'D' flag
        BMI L99BD
 ;;
@@ -3967,9 +3834,7 @@ ENDIF
 .L99CE PHY
        TXA
        TAY
-       LDA (&B6),Y
-       ORA #&80
-       STA (&B6),Y
+       JSR lda_b6_y_ora_80_sta_b6_y
        PLY
        BRA L99BD
 ;;
@@ -3983,17 +3848,14 @@ ENDIF
        PHA
        LDA &B5
        PHA
-       LDA #&40
-       STA &B8
-       LDA #&C2
-       STA &B9
+       JSR lda_40_sta_b8_lda_c2_sta_b9
        JSR L94EE
        PLA
        STA &B5
        PLA
        STA &B4
        JSR L92A8
-       EQUS "Destroy ?", &A0
+       EQUS "Destroy?", &A0
        LDX #&03
 .L9A0F JSR &FFE0
        CMP #&20
@@ -4021,7 +3883,7 @@ ENDIF
        STA &B5
        PLA
        STA &B4
-       JMP L9A29
+       BRA L9A29	; SAVING: 1 byte
 ;;
 .L9A47 PLA
        PLA
@@ -4072,8 +3934,6 @@ ENDIF
 ;;           A   - corrupted
 ;;
 IF PATCH_SD
-.L9A6C LDA #0           ;; EQ - present
-       RTS
 ELIF PATCH_IDE
 .L9A6C LDA &FC47        ;; &FF - absent, <>&FF - present
        INC A            ;; &00 - absent, <>&00 - present
@@ -4083,10 +3943,6 @@ ELIF PATCH_IDE
 .DriveNotPresent
        DEC A
        RTS
-       EQUB &FC         ;; Junk - so a binary compare will pass
-       STZ &FC43        ;; Junk - so a binary compare will pass
-       CMP &FC40        ;; Junk - so a binary compare will pass
-       RTS              ;; Junk - so a binary compare will pass
 ELSE
 .L9A6C LDA #&5A
        JSR L9A75
@@ -4264,8 +4120,11 @@ ENDIF
 .L9B1D STA (&BA),Y      ;; Store byte into workspace
        INY
        BNE L9B14        ;; Loop for all workspace
+IF PATCH_SD
+ELSE
        JSR L9A6C        ;; Check if SCSI hardware present
        BNE L9B38        ;; Not present, jump ahead
+ENDIF
        JSR L9A7F        ;; Read Config HARD/FLOPPY setting
        AND #&80         ;; Keep bit 7
        LDY #&17
@@ -4310,8 +4169,10 @@ ENDIF
        INX              ;; No key pressed?
        BEQ L9B74        ;; Yes, jump to select FS
        DEX
+IF KEEP_REDUNDANT
        CPX #&79         ;; '->' pressed?
        BEQ L9B74        ;; Yes
+ENDIF
        CPX #&41         ;; 'A' pressed?
        BEQ L9B74        ;; Yes
        CPX #&43         ;; 'F' pressed?
@@ -4387,7 +4248,8 @@ ENDIF
        LDX #&0F
        LDY #&FF
        JSR &FFF4        ;; Claim Vectors
-       JSR LBA57        ;; Set a flag
+       LDA #&FF		;; Set a flag
+       STA &C2E4
        JSR LA767        ;; Check workspace checksum
        STZ &C208
        STZ &C20C
@@ -4406,8 +4268,11 @@ ENDIF
        AND #&04
        STA &CD          ;; Put into &CD
        JSR LA7D4        ;; Check some settings
-       JSR L9A6C        ;; See if SCSI hardware present
+IF PATCH_SD
+ELSE
+       JSR L9A6C        ;; Check if SCSI hardware present
        BNE L9C10        ;; No SCSI hardware, jump forward
+ENDIF
        LDA #&20
        TSB &CD          ;; Signal hard drive present
 .L9C10 PLA              ;; Get selection flag from stack
@@ -4415,21 +4280,19 @@ ENDIF
        BNE L9C18        ;; No, jump to keep context
        JSR L849A        ;; Set context to &FFFFFFFF when *fadfs
 .L9C18 LDY #&03         ;; Copy current context to backup context
-.L9C1A LDA &C314,Y
-       STA &C22C,Y
-       DEY
+.L9C1A 
+       JSR lda_c314_y_sta_c22c_y_dey
        BPL L9C1A
        JSR L89D8        ;; Get FSM and root from :0 if context<>-1
        LDX &C317        ;; Get current drive
-       INX
+       INX              ;; If &FF, no directory loaded
        BEQ L9C7D        ;; No drive (eg *fadfs), jump ahead
        JSR LB4CD
 IF PATCH_IDE OR PATCH_SD
        LDA &C31B        ;; Lib not unset, jump ahead
        INC A
        BNE L9C7A
-       LDA &CD          ;; If HD, look for $.Library
-       AND #32
+       JSR chunk_38     ;; If HD, look for $.Library
        BEQ L9C7A
        BNE L9C41
        EQUB &1B
@@ -4449,8 +4312,8 @@ ENDIF
        STA &B5          ;; Point to ":0.LIB*"
        JSR L8FE8
        BNE L9C7A
-.L9C4E LDY #&03
-       LDA (&B6),Y
+.L9C4E 
+       JSR ldy_3_lda_b6_y
        BMI L9C5B
        JSR L8964
        BNE L9C7A
@@ -4465,8 +4328,7 @@ ENDIF
        LDA &C317
        STA &C31B
        LDY #&09
-.L9C70 LDA (&B6),Y
-       AND #&7F
+.L9C70 JSR chunk_40
        STA &C30A,Y
        DEY
        BPL L9C70
@@ -4481,8 +4343,8 @@ ENDIF
 .L9C8B PLA              ;; Get boot flag
        PHA
        BNE L9CA8        ;; No boot, jump forward
-       LDX &C317
-       INX
+       LDX &C317        ;; Get current drive
+       INX              ;; If &FF, no directory loaded
        BNE L9C9B
        STX &C26F
        JSR LA1A1
@@ -4588,7 +4450,7 @@ ENDIF
        ORA #&20         ;; Force to lower case
        CMP #&66         ;; Is it 'f' of 'fadfs'?
        BNE L9D34        ;; No, jump past
-       PLA              ;; Lose previos flag
+       PLA              ;; Lose previous flag
        LDA #&43         ;; Change flags to indicate '*fadfs'
        PHA
        INY              ;; Point to next character
@@ -4685,9 +4547,9 @@ ENDIF
 ;;
 .L9D97 LDX #&15
        LDY #&C2
-       INC &C317
-       BEQ L9DA3
-       DEC &C317
+       INC &C317	;; Increment current drive
+       BEQ L9DA3	;; EQ, drive=&FF, nothing mounted
+       DEC &C317	;; Restore current drive
 .L9DA3 JSR L80A2
        BPL L9DB0        ;; Jump to exit
 ;;
@@ -4728,7 +4590,7 @@ ENDIF
        LDA &CD
        INY
        STA (&F0),Y
-       JMP L9DB4
+       BRA L9DB4
 ;;
 .L9DE3 CMP #&71
        BNE L9DBA
@@ -4806,10 +4668,7 @@ ENDIF
        PHX
        LDA L9F2D+2,X
        PHA
-       LSR A
-       LSR A
-       LSR A
-       LSR A
+       JSR lsr_a_4
        JSR L9283
        PLA
        AND #&0F
@@ -4883,9 +4742,7 @@ ENDIF
 ;; ================
 .L9ED3 JSR L8328
        LDA #&A2
-       STA &B8
-       LDA #&C2
-       STA &B9
+       JSR sta_b8_lda_c2_sta_b9
        JSR LA50D        ;; Skip spaces, etc
        LDX #&FD         ;; Point to table start minus 3
 .L9EE3 INX
@@ -4953,11 +4810,17 @@ ENDIF
        EQUS "TITLE", >(LA292-1), <(LA292-1), &70
        EQUS >(LA3DB-1), <(LA3DB-1)
 ;;
+
 IF PATCH_SD
        ;; The next set of strings must not straddle a page boundary
        ;; because code assumes the MSB is constant. See code at
        ;; .L9283 
        IF  ((P% AND &FF) > &B1)
+       	       \ TODO: If we're squishing, we don't want to waste space like
+	       \ this - if it happens, we should shuffle some code into the dead
+	       \ space, e.g. one of the little three or four instruction
+	       \ subroutines.
+	       ERROR "Dead space"
                ORG ((P% + &FF) AND &FF00) 
        ENDIF
 ENDIF
@@ -4975,6 +4838,124 @@ ENDIF
        EQUB &00
 .L9FF4 EQUS "<Title>"
 .L9FFB EQUB &00
+
+.chunk_18
+       LDA &B6
+       STA &C293
+       LDA &B7
+       STA &C294
+       RTS
+
+.chunk_19
+       JSR LAD04
+       ROR &C204,X
+       SEC
+       ROL &C204,X
+       RTS
+
+IF PATCH_SD=FALSE
+.chunk_20
+       LDA &FEE5        ;; Get byte from Tube
+       STA &FC40        ;; Write byte to SCSI/IDE data port
+       RTS
+
+.chunk_21
+       LDA &FC40        ;; Get byte from SCSI/IDE data port
+       STA &FEE5        ;; Write to Tube
+       RTS
+ENDIF
+
+.chunk_22
+       LDA &C22F
+       STA &C317
+       RTS
+
+.chunk_23
+       LDA &C237
+       ORA &C238
+       ORA &C239
+       RTS
+
+.chunk_24
+       LDA &BFFD,X      ;; Get FSM entry start sector
+       ADC &C0FD,X      ;; Add FSM entry length
+       RTS
+
+.chunk_25
+       LDA &C0FD,X
+       ADC &C237,Y
+       STA &C0FD,X
+       RTS
+
+.chunk_26
+       LDY #&04
+       LDA (&B6),Y      ;; Check 'E' bit
+       RTS
+
+.chunk_27
+       STA &C215,X      ;;  to workspace
+       DEY
+       DEX
+       RTS
+
+.chunk_28
+       LDA (&B6),Y
+       ASL A
+       ROL &C22B        ;; Copy LWR into &C22B
+       RTS
+
+.chunk_29
+       LDY #&12
+       LDA (&B6),Y
+       CMP #&01
+       RTS
+
+.chunk_30
+       INY
+       LDA #&00
+       ADC (&B6),Y
+       STA &C224,Y
+       DEX
+       RTS
+
+.chunk_31
+       JSR L8DFE
+       JMP L8E7A
+
+.chunk_32
+       LDA &C230,Y
+       JMP sta_c22c_y_dey
+
+.chunk_33
+       JSR lda_b4_y_and_7f
+       CMP #&22
+       RTS
+
+.chunk_34
+       LDA &C2B4
+       CMP #&03
+       RTS
+
+.chunk_35
+       LDA &C29A
+       STA &C2B7
+       JMP LB9CA
+
+.chunk_36
+       LDA &0D5E        ;; Get drive control byte
+       STA &FE24        ;; Set drive control register
+       RTS
+
+.chunk_37
+       STA &A3
+       BIT &C2E4
+       RTS
+
+.chunk_38
+       LDA &CD          ;; Get ADFS I/O status
+       AND #&20         ;; Hard drive present?
+       RTS
+
 ;;
 ;; FSC 7 - Handle Request
 ;; ======================
@@ -5011,7 +4992,7 @@ ENDIF
        EQUB &00
 ;;
 .LA036 LDA #&20
-       BRA LA03C
+       EQUB &2C \ BIT abs - see http://www.6502.org/tutorials/6502opcodes.html#BIT
 ;;
 .LA03A LDA #&0D
 .LA03C PHX
@@ -5092,6 +5073,7 @@ ENDIF
        BCC LA091        ;; If FSM not filling up, exit
        JSR L92A8        ;; Print message
        EQUB "Compaction recommended", &8D
+.RTS12
        RTS
 ;;
 ;;
@@ -5101,6 +5083,12 @@ ENDIF
        PHA              ;; Save current drive
        TAX
        INX
+       \ TODO: This hasn't been tested (but neither have any of my other
+       \ changes anyway). We don't have any heads to park in an SD card build.
+IF PATCH_SD
+       BEQ RTS12
+       JMP LB210        ;; Do CLOSE#0
+ELSE
        BEQ LA10E        ;; No drive selected
        JSR LB210        ;; Do CLOSE#0
 .LA10E LDA #&60
@@ -5116,6 +5104,7 @@ ENDIF
        PLA
        STA &C317        ;; Restore current drive
        RTS
+ENDIF
 ;;
 .LA12A EQUB &00
        EQUB &00         ;; ;; &FFFFC900
@@ -5135,8 +5124,7 @@ ENDIF
        BEQ LA13F
        DEY
 .LA13F STY &C26F
-       LDY #&00
-       LDA (&B4),Y
+       jsr ldy_0_lda_b4_y
        CMP #&20
        BCC LA150
        JSR L8847
@@ -5175,6 +5163,7 @@ ENDIF
        INX
        DEY
        BPL LA18B
+.RTS1
        RTS
 ;;
 .LA196 EQUS &0D, &22, "tesnU", &22
@@ -5200,13 +5189,12 @@ ENDIF
        STA &C31F
 .LA1C9 LDA &C31B        ;; Get library drive
        CMP &C26F        ;; Compare with ???
-       BNE LA1DE        ;; If different, jump past
+       BNE RTS1         ;; If different, jump past
        LDA #&FF
        STA &C31A        ;; Set library to &FFFFxxxx
        STA &C31B
        LDX #&0A
-       JSR LA189        ;; Set library name to "Unset"
-.LA1DE RTS
+       BRA LA189        ;; Set library name to "Unset"
 ;;
 .LA1DF EQUB &00         ;; ;; Flag = &00
        EQUB &00         ;; ;; &FFFFC900
@@ -5220,10 +5208,10 @@ ENDIF
        EQUB &01         ;; ;; 1 sector
        EQUB &00
 ;;
-.LA1EA LDA #&00
+.LA1EA
        LDX #&03
-.LA1EE STA &C215,X
-       STA &C227,X
+.LA1EE STZ &C215,X
+       STZ &C227,X
        DEX
        BPL LA1EE
        JSR L8632
@@ -5295,9 +5283,7 @@ ENDIF
        JSR L8FF3
        JSR LA50D
        LDY #&00
-.LA29D LDA (&B4),Y
-       AND #&7F
-       CMP #&22
+.LA29D JSR chunk_33
        BEQ LA2A9
        CMP #&20
        BCS LA2AB
@@ -5309,8 +5295,7 @@ ENDIF
        JMP L8F91
 ;;
 .LA2B6 JSR LA50D
-       LDY #&00
-       LDA (&B4),Y
+       jsr ldy_0_lda_b4_y
        CMP #&21
        BCS LA2EB
        LDA #&84
@@ -5336,14 +5321,12 @@ ENDIF
        LDA (&B4),Y
        STA &C216
        INY
-       LDA (&B4),Y
-       CMP #&20
+       JSR chunk_43
        BEQ LA2FF
        CMP #&2C
        BNE LA2DB
 .LA2FF INY
-       LDA (&B4),Y
-       CMP #&20
+       JSR chunk_43
        BEQ LA2FF
        STA &C217
        INY
@@ -5357,8 +5340,7 @@ ENDIF
        STA &C217
        DEY
 .LA31F INY
-       LDA (&B4),Y
-       CMP #&20
+       JSR chunk_43
        BEQ LA31F
        BCS LA2DB
        LDX #&03
@@ -5422,8 +5404,7 @@ ENDIF
        LDA &B4
        PHA
        JSR LA4F5
-       LDY #&00
-       LDA (&B4),Y
+       jsr ldy_0_lda_b4_y
        CMP #&20
        BCS LA3CB
        PLA
@@ -5508,8 +5489,7 @@ ENDIF
        STX &B8
        STY &B9
        JSR L8BBE
-       LDY #&04
-       LDA (&B6),Y
+       JSR chunk_26
        LDY #&00
        ORA (&B6),Y
        BMI LA45C
@@ -5532,43 +5512,46 @@ ENDIF
        LDY #&C2
        LDA #&04
        JMP &0406
-;;
-.LA482 JSR L9486
+
+;; *LIB <dir>
+;; ==========
+.LA482 JSR L9486	;; Search for directory
        LDY #&09
-.LA487 LDA &C8CC,Y
+.LA487 LDA &C8CC,Y	;; Copy name to LIBNAME
        STA &C30A,Y
        DEY
        BPL LA487
        LDY #&03
-.LA492 LDA &C314,Y
+.LA492 LDA &C314,Y	;; Copy CURRENT to LIB
        STA &C318,Y
        DEY
        BPL LA492
-.LA49B JMP L89D8
+.LA49B JMP L89D8        ;; Finish by loading $
 ;;
 .LA49E LDY #&03
 .LA4A0 LDA &C314,Y
        STA &C230,Y
        LDA &C318,Y
-       STA &C22C,Y
-       DEY
+       jsr sta_c22c_y_dey
        BPL LA4A0
        BMI LA49B
 .LA4B1 LDY #&03
-.LA4B3 LDA &C230,Y
-       STA &C22C,Y
-       DEY
+.LA4B3 JSR chunk_32
        BPL LA4B3
        RTS
-;;
+
+;; *LCAT
+;; =====
 .LA4BD JSR LA49E
        JSR LA4B1
-       JSR L93DB
+       JSR L93DB	;; CAT the library
        JMP L89D8
-;;
+
+;; *LEX
+;; ====
 .LA4C9 JSR LA49E
        JSR LA4B1
-       JSR L943D
+       JSR L943D	;; EX the library
        JMP L89D8
 ;;
 .LA4D5 LDY #&03
@@ -5600,11 +5583,11 @@ ENDIF
        BCC LA50D
        INC &B5
 ;;
-.LA50D LDY #&00
+.LA50D 
+       LDY #&00
        CLC
        PHP
-.LA511 LDA (&B4),Y      ;; Get current character
-       CMP #&20         ;; Is it a space?
+.LA511 JSR chunk_43
        BCC LA528        ;; Control character,
        BEQ LA525        ;; Space,
        CMP #&22         ;; Is it a quote?
@@ -5626,8 +5609,8 @@ ENDIF
        INC &B5
 .LA533 RTS
 ;;
-.LA534 LDY #&00
-       LDA (&B4),Y
+.LA534 
+       jsr ldy_0_lda_b4_y
        AND #&7F
        CMP #&3A
        BNE LA533
@@ -5643,8 +5626,8 @@ ENDIF
        BEQ LA555
        JMP L8BD3
 ;;
-.LA555 LDY #&03
-       LDA (&B6),Y
+.LA555 
+       JSR ldy_3_lda_b6_y
        JSR L89D8
        BPL LA580
        PLX
@@ -5653,8 +5636,7 @@ ENDIF
        STX &B5
        PHA
        PHX
-       LDY #&00
-       LDA (&B4),Y
+       jsr ldy_0_lda_b4_y
        AND #&7D
        CMP #&24
        BEQ LA53E
@@ -5668,10 +5650,7 @@ ENDIF
        BEQ LA579
 .LA580 JSR LA394
        JSR LA534
-       LDA #&40
-       STA &B8
-       LDA #&C2
-       STA &B9
+       JSR lda_40_sta_b8_lda_c2_sta_b9
        JSR L8CED
        PHP
        JSR L8E01
@@ -5686,9 +5665,8 @@ ENDIF
 .LA5A5 LDA &C22E
        BPL LA5B5
        LDY #&02
-.LA5AC LDA &C314,Y
-       STA &C22C,Y
-       DEY
+.LA5AC 
+       JSR lda_c314_y_sta_c22c_y_dey
        BPL LA5AC
 .LA5B5 JSR L89D8
        PLX
@@ -5731,9 +5709,7 @@ ENDIF
 .LA5FC LDA (&B6),Y
        AND #&80
        STA &C22B
-       LDA (&B4),Y
-       AND #&7F
-       CMP #&22
+       JSR chunk_33
        BEQ LA60F
        CMP #&21
        BCS LA611
@@ -5751,9 +5727,7 @@ ENDIF
 .LA625 LDA &C237
        BNE LA622
        LDY #&09
-       LDA (&B6),Y
-       ORA #&80
-       STA (&B6),Y
+       JSR lda_b6_y_ora_80_sta_b6_y
        JSR L8F91
        LDY #&0A
        LDX #&07
@@ -5788,12 +5762,8 @@ ENDIF
        DEX
        BPL LA66D
        JSR L89D8
-       LDA #&40
-       STA &B8
-       LDA #&C2
-       STA &B9
-       JSR L8DFE
-       JSR L8E7A
+       JSR lda_40_sta_b8_lda_c2_sta_b9
+       JSR chunk_31
        LDY #&03
 .LA689 LDA (&B6),Y
        ASL A
@@ -5819,10 +5789,9 @@ ENDIF
        JSR L921B
        JMP L89D8
 ;;
-.LA6BB LDY #&03
-       LDA (&B6),Y
-       BMI LA6C2
-       RTS
+.LA6BB 
+       JSR ldy_3_lda_b6_y
+       BPL RTS13
 ;;
 .LA6C2 LDY #&02
 .LA6C4 LDA &C314,Y
@@ -5830,8 +5799,7 @@ ENDIF
        DEY
        BPL LA6C4
        LDY #&09
-.LA6CF LDA (&B6),Y
-       AND #&7F
+.LA6CF JSR chunk_40
        STA &C274,Y
        DEY
        BPL LA6CF
@@ -5873,6 +5841,7 @@ ENDIF
        LDA L84DC,X      ;; Get byte from "Hugo" string
        CPX #&05
        BNE LA71C        ;; Loop for 4 characters
+.RTS13
 .LA72E RTS
 ;;
 .LA72F JSR L834E        ;; Generate error
@@ -5936,10 +5905,7 @@ ENDIF
        BCS LA76E
        CMP #&01
        BNE LA76E
-.LA79B DEX
-       DEX
-       DEX
-       DEX
+.LA79B JSR dex_4
        BPL LA78E
        BCC LA76E
        JSR LA7C9
@@ -6026,14 +5992,13 @@ ENDIF
        DEY
        BPL LA82E
        JSR L82AA
+.ldx_ldy_l8331_jsr_l82ae
        LDX #<L8831
        LDY #>L8831
-       JMP L82AE
+       JMP L82AE        ;; Load FSM
 ;;
 .LA849 LDA #&7F
-       STA &B8
-       LDA #&C2
-       STA &B9
+       JSR sta_b8_lda_c2_sta_b9
        LDA #&74
        STA &C27F
        LDA #&C2
@@ -6042,10 +6007,7 @@ ENDIF
        BEQ LA863
        JMP L8BD3
 ;;
-.LA863 LDA &B6
-       STA &C293
-       LDA &B7
-       STA &C294
+.LA863 JSR chunk_18
        LDA &B4
        STA &C291
        LDA &B5
@@ -6057,9 +6019,8 @@ ENDIF
        BPL LA879
        JSR L89D8
        LDY #&03
-.LA887 LDA &C314,Y
-       STA &C22C,Y
-       DEY
+.LA887 
+       JSR lda_c314_y_sta_c22c_y_dey
        BPL LA887
        JSR LA394
        JSR L8743
@@ -6074,8 +6035,7 @@ ENDIF
        DEY
        BPL LA8A3
        JSR LA7EC
-.LA8AF LDY #&04
-       LDA (&B6),Y
+.LA8AF JSR chunk_26
        DEY
        ORA (&B6),Y
        BPL LA8C7
@@ -6087,10 +6047,7 @@ ENDIF
        BEQ LA8AF
        JMP L89D8
 ;;
-.LA8C7 LDA &B6
-       STA &C293
-       LDA &B7
-       STA &C294
+.LA8C7 JSR chunk_18
        JSR L8C6D
        LDY #&16
        LDA (&B6),Y
@@ -6111,16 +6068,14 @@ ENDIF
        DEY
        BPL LA8EE
        LDY #&09
-.LA8FD LDA (&B6),Y
-       AND #&7F
+.LA8FD JSR chunk_40
        STA &C274,Y
        DEY
        BPL LA8FD
        LDA #&0D
        STA &C27E
        JSR LA821
-       JSR L8DFE
-       JSR L8E7A
+       JSR chunk_31
        JSR L8F5D
        LDY #&02
 .LA91A LDA &C23A,Y
@@ -6148,8 +6103,7 @@ ENDIF
        STA &C2AA
        LDA &C317
        PHA
-       LDA #&00
-       STA &C317
+       STZ &C317
        JSR L96AC
        PLA
        STA &C317
@@ -6159,8 +6113,8 @@ ENDIF
 ;;
 ;; FSC 6 - New FS taking over
 ;; ==========================
-.LA96D LDX &C317
-       INX
+.LA96D LDX &C317        ;; Get current drive
+       INX              ;; If &FF, no directory loaded
        BEQ LA983
        JSR L89D8
        LDA #&FF         ;; Continue into OSARGS &FF,0
@@ -6194,10 +6148,7 @@ ENDIF
 .LA992 LDX #&10
 .LA994 JSR LAB06        ;; Check things
        STZ &C204,X
-       DEX
-       DEX
-       DEX
-       DEX
+       JSR dex_4
        BPL LA994
        INC &C204
        JSR L8328        ;; Wait for ensuring to complete
@@ -6231,6 +6182,7 @@ ENDIF
        LDX &C3          ;; Restore X,Y
        LDY &C2
        RTS
+
 ;;
 ;; OSARGS 1,Y - Write PTR
 ;; ----------------------
@@ -6238,19 +6190,14 @@ ENDIF
        BNE LAA59        ;; Jump if not 1, not PTR=
        LDA &C3AC,Y
        BPL LAA16
+
+      
+
 .LA9E2 LDX &C3
-       LDA &00,X
-       STA &C29A
-       LDA &01,X
-       STA &C29B
-       LDA &02,X
-       STA &C29C
-       LDA &03,X
-       STA &C29D
-       JSR LAE68
-       LDX &C3
-       LDY &CF
-       LDA &00,X
+
+       JSR chunk_1
+
+.chunk_4
        STA &C37A,Y
        LDA &01,X
        STA &C370,Y
@@ -6258,7 +6205,8 @@ ENDIF
        STA &C366,Y
        LDA &03,X
        STA &C35C,Y
-       JMP LA9D0
+       BRA LA9D0
+
 ;;
 .LAA16 LDX &C3
        LDY &CF
@@ -6273,14 +6221,8 @@ ENDIF
        SBC &03,X
        BCC LAA48
        LDA &00,X
-       STA &C37A,Y
-       LDA &01,X
-       STA &C370,Y
-       LDA &02,X
-       STA &C366,Y
-       LDA &03,X
-       STA &C35C,Y
-       JMP LA9D0
+
+       BRA chunk_4
 ;;
 .LAA48 JSR L836B
        EQUB &B7         ;; ERR=183
@@ -6300,7 +6242,7 @@ ENDIF
        STA &02,X
        LDA &C334,Y
        STA &03,X
-.LAA72 JMP LA9D0
+.LAA72 BRA LA9D0
 ;;
 ;; OSARGS 3,Y - Write EXT
 ;; ----------------------
@@ -6311,18 +6253,8 @@ ENDIF
        BMI LAA82
        JMP LB0FA
 ;;
-.LAA82 LDA &00,X
-       STA &C29A
-       LDA &01,X
-       STA &C29B
-       LDA &02,X
-       STA &C29C
-       LDA &03,X
-       STA &C29D
-       JSR LAE68
-       LDX &C3
-       LDY &CF
-       LDA &00,X
+.LAA82 JSR chunk_1
+
        STA &C352,Y
        LDA &01,X
        STA &C348,Y
@@ -6346,10 +6278,7 @@ ENDIF
        LDA &C204,X
        AND #&01
        STA &C204,X
-.LAAD0 DEX
-       DEX
-       DEX
-       DEX
+.LAAD0 jsr dex_4
        BPL LAABB
        JMP LA98C
 ;;
@@ -6378,8 +6307,6 @@ ELIF PATCH_IDE
        LDA &C203,X      ;; Set sector b16-b21
        STA &C333
        JMP SetRandom
-       EQUB &00         ;; Junk - so a binary compare will pass
-       JMP L831E        ;; Junk - so a binary compare will pass
 ELSE
 .LAAD9 PHA
        JSR L8328        ;; Wait for ensuring to complete
@@ -6409,8 +6336,7 @@ ENDIF
        LSR A
        ADC #&C9
        STA &BD
-       LDA #&00
-       STA &BC
+       STZ &BC
        LDA &C204,X
        AND #&BF
        STA &C204,X
@@ -6428,13 +6354,12 @@ ENDIF
        JSR L8099        ;; Set default retries
        STX &C1
 IF INCLUDE_FLOPPY
-       LDA &CD          ;; Get hard drive presence
-       AND #&20
+       JSR chunk_38
        BEQ LAB50        ;; No hard drive, jump forward to do floppy
        LDA &C203,X      ;; Get drive
        BPL LAB5E        ;; Hard drive, jump ahead
 .LAB50 LDX &C1
-       JSR LBA51
+       JSR LBA5D	;; SAVING: 3 bytes
        BEQ LAB86
        DEC &CE
        BPL LAB50
@@ -6447,7 +6372,9 @@ ENDIF
        LDA #&0A         ;; &0A - Write
        JSR LAAD9        ;; Send command block to SCSI/IDE/SD
        LDY #&00
+IF NOT(PATCH_SD)
        JSR L8332        ;; Wait for SCSI not busy
+ENDIF
 IF PATCH_IDE OR PATCH_SD
        BRA LAB76        ;; Always jump to write
 .ResultCodes
@@ -6460,7 +6387,6 @@ IF PATCH_IDE OR PATCH_SD
        EQUB &11
        EQUB &19
        EQUB &03
-       EQUB >L82BD      ;; Junk - so a binary compare will pass
 ELSE
        BPL LAB76        ;; Jump ahead with writing
        JSR L81AD        ;; Release Tube, get SCSI status
@@ -6497,9 +6423,7 @@ ENDIF
        TSB &CD
        DEY
 IF PATCH_IDE OR PATCH_SD
-       NOP              ;; Don't trample on IDE register
-       NOP
-       NOP
+                        ;; Don't trample on IDE register
 ELSE
        STY &FC43        ;; Set &FC43 to &FF
 ENDIF
@@ -6518,9 +6442,6 @@ IF PATCH_IDE OR PATCH_SD
        STA &C333        ;; Store for any error
        LDA #&7F
        RTS
-       EQUB &03         ;; Junk - so a binary compare will pass
-                        ;; 13 spare bytes
-                        ;; next=&ABB4
 ELSE
 .LAB89 LDA &CD          ;; Get flags
        AND #&21         ;; Check for hard drive+IRQ pending
@@ -6534,12 +6455,13 @@ ENDIF
        RTS
 ;;
 .LAB9B PHY              ;; Send something to SCSI
-       LDA #&00
-       STA &FC43
+       STZ &FC43
        LDA #&01
        TRB &CD
        LDA &FC40
+IF NOT(PATCH_SD)
        JSR L8332
+ENDIF
        ORA &FC40
        STA &C331
        JMP L9DB4        ;; Restore Y,X, claim call
@@ -6549,8 +6471,7 @@ ENDIF
 ;; ===================
 .LABB4 LDA &C331
        BEQ LABE6        ;; Jump forward to exit
-       LDA #&00
-       STA &C331        ;; Clear the flag
+       STZ &C331        ;; Clear the flag
        LDX &C2D4
        JSR L8374        ;; Generate 'Data lost' error
        EQUB &CA         ;; ERR=202
@@ -6563,8 +6484,7 @@ ENDIF
        LSR A
        ADC #&C9
        STA &BF
-       LDA #&00
-       STA &BE
+       STZ &BE
 .LABE6 RTS
 ;;
 ;;
@@ -6611,10 +6531,7 @@ ENDIF
        DEY
        DEY
        BPL LAC2E
-       JSR LAD04
-       ROR &C204,X
-       SEC
-       ROL &C204,X
+       JSR chunk_19
 .LAC4A INX
        INX
        INX
@@ -6630,18 +6547,12 @@ ENDIF
        ROL A
        STA &C204,X
        JSR LAD04
-       JSR LAD04
-       ROR &C204,X
-       SEC
-       ROL &C204,X
+       JSR chunk_19
 .LAC6E JMP LAB03
 ;;
-.LAC71 DEX
-       DEX
-       DEX
-       DEX
+.LAC71 JSR dex_4
        BMI LAC7A
-       JMP LABED
+       BRA LABED
 ;;
 .LAC7A LDX &C295
        LDA &C296
@@ -6661,14 +6572,13 @@ ENDIF
        JSR L8099
 .LACA8 LDX &B0
 IF INCLUDE_FLOPPY
-       LDA &CD
-       AND #&20
+       JSR chunk_38
        BEQ LACB5
 ENDIF
        LDA &C203,X
        BPL LACC1
 IF INCLUDE_FLOPPY
-.LACB5 JSR LBA54
+.LACB5 JSR LBA61	; SAVING: 3 bytes
        BEQ LACDA
 ENDIF
 .LACBA DEC &CE          ;; Decrement retries
@@ -6679,10 +6589,10 @@ ENDIF
 ;; --------------------
 .LACC1 LDA #&08         ;; &08 - READ
        JSR LAAD9        ;; Send command block to SCSI
+IF NOT(PATCH_SD)
        JSR L8332        ;; Wait for SCSI not busy
+ENDIF
 IF PATCH_IDE OR PATCH_SD
-       NOP
-       NOP
 ELSE
        BMI LACD5        ;; If SCSI writing, finish
 ENDIF
@@ -6722,10 +6632,7 @@ ENDIF
 .LACE8 LDA &C204,X
        AND #&01
        BNE LAD24
-       DEX
-       DEX
-       DEX
-       DEX
+       JSR dex_4
        BPL LACE8
        JMP LA76E
 ;;
@@ -6734,10 +6641,7 @@ ENDIF
        EQUS "Channel"
        EQUB &00
 ;;
-.LAD04 DEX
-       DEX
-       DEX
-       DEX
+.LAD04 JSR dex_4
        BPL LAD0C
        LDX #&10
 .LAD0C RTS
@@ -6805,7 +6709,7 @@ ENDIF
        AND #&C8
        STA &C3AC,X
        JSR L836B        ;; Generate an error
-       EQUB &DF         ;; ERR=150
+       EQUB &DF         ;; ERR=223
        EQUS "EOF"
        EQUB &00
 ;;
@@ -6831,24 +6735,16 @@ ENDIF
        SEC              ;; Flag EOF
        LDA #&FE         ;; EOF value
        RTS              ;; Return
+
 ;;
 ;; Read byte from channel
 ;; ----------------------
 .LAD9C LDX &CF          ;; Get channel offset
-       CLC
-       LDA &C3CA,X
-       ADC &C370,X
-       STA &C296
-       LDA &C3C0,X
-       ADC &C366,X
-       STA &C297
-       LDA &C3B6,X
-       ADC &C35C,X
-       STA &C298        ;; &C296/7/8=&C3CA/B/C,X+&C370/1/2,X
+
+       JSR chunk_2
+
        LDA #&40
-       JSR LABE7        ;; Manipulate various things
-       LDX &CF
-       LDY &C37A,X
+       JSR chunk_44
        LDA #&00
        STA &C2CF
        JSR LB180
@@ -6877,9 +6773,7 @@ ENDIF
        STA &C22E
        JSR L89D8
        LDY #&02
-.LAE06 LDA &C230,Y
-       STA &C22C,Y
-       DEY
+.LAE06 JSR chunk_32
        BPL LAE06
        LDA &C233
        STA &C22F
@@ -6923,8 +6817,8 @@ ENDIF
        BCC LAE38
        INC &B9
        BCS LAE38
-.LAE68 LDA #&00
-       STA &C2B5
+.LAE68
+       STZ &C2B5
 .LAE6D LDA &C22F
        STA &C2BF
        LDX #&02
@@ -6932,9 +6826,7 @@ ENDIF
        STA &C2BC,X
        DEX
        BPL LAE75
-       LDA #&FF
-       STA &C22E
-       STA &C22F
+       JSR chunk_10
        LDX &CF
        LDA &C384,X
        CMP &C29D
@@ -6966,9 +6858,7 @@ ENDIF
        JMP LAFE4
 ;;
 .LAED0 JSR LADD4
-       LDA &C3A2,X
-       CMP #&01
-       LDA &C398,X
+       JSR chunk_45
        ADC #&00
        STA &C237
        LDA &C38E,X
@@ -7135,8 +7025,7 @@ ENDIF
        BNE LB06A
        LDA &C236
        CMP &C298
-       BNE LB06A
-       JMP LB0BD
+       BEQ LB0BD
 ;;
 .LB06A JSR L8328
        INC &C296
@@ -7170,7 +7059,7 @@ ENDIF
        INC &C202,X
        BNE LB087
        INC &C203,X
-       JMP LB087
+       BRA LB087
 ;;
 .LB0BD LDX &CF
        LDA &C29A
@@ -7230,20 +7119,11 @@ ENDIF
        DEC &C2CF
        JSR LAE68
        LDX &CF
-.LB14D CLC
-       LDA &C3CA,X
-       ADC &C370,X
-       STA &C296
-       LDA &C3C0,X
-       ADC &C366,X
-       STA &C297
-       LDA &C3B6,X
-       ADC &C35C,X
-       STA &C298
+.LB14D 
+       JSR chunk_2
+
        LDA #&C0
-       JSR LABE7
-       LDX &CF
-       LDY &C37A,X
+       JSR chunk_44
        PLA
        STA (&BE),Y
        PHA
@@ -7373,9 +7253,7 @@ ENDIF
 .LB275 LDX #&09
 .LB277 LDA &C3AC,X
        BPL LB2AA
-       LDA &C3B6,X
-       AND #&E0
-       CMP &C317
+       JSR chunk_8
        BNE LB2AA
        LDA &C3E8,X
        CMP &C314
@@ -7394,8 +7272,7 @@ ENDIF
 ;;
 .LB2AA DEX
        BPL LB277
-       LDY #&00
-       LDA (&B6),Y
+       JSR ldy_0_lda_b6_y
        BMI LB2B6
        JMP L8BFB
 ;;
@@ -7444,11 +7321,10 @@ ENDIF
        STA &C3DE,X
        LDA &C316
        STA &C3D4,X
-       LDA #&00
-       STA &C37A,X
-       STA &C370,X
-       STA &C366,X
-       STA &C35C,X
+       STZ &C37A,X
+       STZ &C370,X
+       STZ &C366,X
+       STZ &C35C,X
        LDA &C2A0
        STA &C3AC,X
        TXA
@@ -7484,11 +7360,11 @@ ENDIF
        LDY #&01
        LDA (&B6),Y
        BPL LB355
-       JMP LB3CD
+       BRA LB3CD
 ;;
-.LB36F LDA #&00
+.LB36F 
        LDX #&0F
-.LB373 STA &C242,X
+.LB373 STZ &C242,X
        DEX
        BPL LB373
        LDX &C1FE
@@ -7526,12 +7402,12 @@ ENDIF
        LDA &C241
        STA &B5
        JSR L8FE8
-.LB3CD LDA #&00
+.LB3CD 
        LDX &CF
-       STA &C352,X
-       STA &C348,X
-       STA &C33E,X
-       STA &C334,X
+       STZ &C352,X
+       STZ &C348,X
+       STZ &C33E,X
+       STZ &C334,X
        JMP LB2D1
 ;;
 ;; CLOSE a channel
@@ -7601,9 +7477,7 @@ ENDIF
        LDA &C236
        ADC &C334,X
        STA &C236
-       LDA &C3A2,X
-       CMP #&01
-       LDA &C398,X
+       JSR chunk_45
        SBC &C348,X
        STA &C237
        LDA &C38E,X
@@ -7633,27 +7507,23 @@ ENDIF
        STA (&B8),Y
        JSR L84E1        ;; Calculate something in FSM
        JSR L8F91
-       JMP LB435        ;; Jump back to write buffer?
+       BRA LB435        ;; Jump back to write buffer?
 ;;
 .LB4B9 LDX #&09
 .LB4BB LDA &C3AC,X
        BEQ LB4CA
-       LDA &C3B6,X
-       AND #&E0
-       CMP &C317
+       JSR chunk_8
        BEQ LB4DF
 .LB4CA DEX
        BPL LB4BB
 ;;
-.LB4CD LDA &C317
-       JSR LB5C5
+.LB4CD JSR chunk_12
        LDA &C1FB
        STA &C321,X
        LDA &C1FC
        STA &C322,X
 .LB4DF JSR LB510
-.LB4E2 LDA &C317
-       JSR LB5C5
+.LB4E2 JSR chunk_12
        LDA &C1FB
        CMP &C321,X
        BNE LB4FF
@@ -7696,14 +7566,11 @@ ENDIF
 .LB545 RTS
 ;;
 .LB546 JSR LB510
-       LDA &C317
-       JSR LB5C5
+       JSR chunk_12
        JSR LB560
        EOR &C2C2
        BEQ LB545
-       LDX #<L8831
-       LDY #>L8831
-       JSR L82AE
+       JSR ldx_ldy_l8331_jsr_l82ae
        BRA LB4E2
 ;;
 .LB560 LDA #&FF
@@ -7741,23 +7608,17 @@ ENDIF
        STY &C317
        CPY #&FF
        BNE LB5B5
-       LDA &C22F
-       STA &C317
+       JSR chunk_22
        STY &C22F
 .LB5B5 PLA
        CMP &C317
        BEQ LB5C2
-       LDX #<L8831
-       LDY #>L8831
-       JSR L82AE
+       JSR ldx_ldy_l8331_jsr_l82ae
 .LB5C2 PLY
        PLX
        RTS
 ;;
-.LB5C5 LSR A
-       LSR A
-       LSR A
-       LSR A
+.LB5C5 JSR lsr_a_4
        TAX
        RTS
 ;;
@@ -7778,7 +7639,11 @@ ENDIF
        BCC LB5F0
        JMP LB8DA
 ;;
+.ldy_0_lda_b6_y
+       LDY #&00
+       LDA (&B6),Y
 .LB5EF RTS
+
 ;;
 .LB5F0 TAY
        BEQ LB5EF
@@ -7793,8 +7658,7 @@ ENDIF
        JSR LB56C
        PLP
        BMI LB614
-       LDA &C2B4
-       CMP #&03
+       JSR chunk_34
        BCS LB614
        JMP LB0FA
 ;;
@@ -7821,9 +7685,8 @@ ENDIF
        INY
        DEX
        BPL LB635
-       LDA &C2B4
+       JSR chunk_34
        STA &C2B5
-       CMP #&03
        BCS LB64E
        JSR LAE6D
 .LB64E LDY #&09
@@ -7843,8 +7706,7 @@ ENDIF
        LDA &C29D
        STA &C35C,X
        STA (&C6),Y
-       LDA &C2B4
-       CMP #&03
+       JSR chunk_34
        BCS LB690
 .LB67C LDX #&03
        LDY #&05
@@ -7855,7 +7717,7 @@ ENDIF
        INY
        DEX
        BPL LB680
-       JMP LB6FE
+       BRA LB6FE
 ;;
 .LB690 JSR LAD25
        BCS LB67C
@@ -7915,7 +7777,7 @@ ENDIF
        BPL LB703
        LDA &C8
        BNE LB715
-       JMP LB7A5
+       BRA LB7A5
 ;;
 .LB715 LDX &CF
        CLC
@@ -7927,12 +7789,9 @@ ENDIF
        STA &C297
        LDA &C3B6,X
        ADC &CB
-       STA &C298
-       LDA #&02
-       CMP &C2B4
-       LDA #&80
-       ROR A
-       JSR LABE7
+
+       JSR chunk_6
+
        LDA &C8
        STA &C2B6
        STZ &C2B7
@@ -7942,9 +7801,7 @@ ENDIF
        BNE LB768
        DEX
        BPL LB745
-       LDA &C29A
-       STA &C2B7
-       JSR LB9CA
+       JSR chunk_35
 .LB758 JSR L89D8
        JSR LB19C
 .LB75E LDA #&00
@@ -7982,8 +7839,7 @@ ENDIF
 .LB7A5 LDA &C241
        ORA &C242
        ORA &C243
-       BNE LB7B3
-       JMP LB82B
+       BEQ LB82B
 ;;
 .LB7B3 LDA #&01
        STA &C215
@@ -8030,11 +7886,8 @@ ENDIF
        BPL LB807
        JSR LAAB9
        JSR L8A42
-       LDA &C22F
-       STA &C317
-       LDA #&FF
-       STA &C22F
-       STA &C22E
+       JSR chunk_22
+       JSR chunk_10
 .LB82B LDA &C29A
        BNE LB833
        JMP LB758
@@ -8049,25 +7902,18 @@ ENDIF
        STA &C297
        LDA &C3B6,X
        ADC &C29D
-       STA &C298
-       LDA #&02
-       CMP &C2B4
-       LDA #&80
-       ROR A
-       JSR LABE7
+
+       JSR chunk_6
+
        STZ &C2B6
-       LDA &C29A
-       STA &C2B7
-       JSR LB9CA
+       JSR chunk_35
        JMP LB758
 ;;
 .LB86B BIT &CD
        BPL LB898
-       LDA &C2BA
-       LDX &C2BB
-       JSR L8053
-       LDA &C2BA
-       CMP #&FE
+
+       JSR chunk_7
+
        BCC LB885
        LDA &C2BB
        INC A
@@ -8110,8 +7956,7 @@ ENDIF
        LDY #&FF
 .LB8C6 INY
        BCC LB8D3
-       LDA (&B4),Y
-       AND #&7F
+       JSR lda_b4_y_and_7f
        CMP #&21
        BCS LB8D3
        LDA #&20
@@ -8129,24 +7974,18 @@ ENDIF
        BEQ LB94F
        DEY
        BNE LB925
-       JMP LB96A
+       BRA LB96A
 ;;
 .LB8EB JSR LB86B
        LDY #&FF
-.LB8F0 INY
-       LDA &C8D9,Y
-       AND #&7F
-       CMP #&20
+.LB8F0 JSR chunk_46
        BCC LB8FE
        CPY #&13
        BNE LB8F0
 .LB8FE TYA
        JSR LB8A5
        LDY #&FF
-.LB904 INY
-       LDA &C8D9,Y
-       AND #&7F
-       CMP #&20
+.LB904 JSR chunk_46
        BCC LB915
        JSR LB8A5
        CPY #&13
@@ -8162,13 +8001,10 @@ ENDIF
 .LB925 JSR L803A
        JMP LB75E
 ;;
-.LB92B JSR LB86B
-       LDA #&01
-       JSR LB8A5
+.LB92B JSR chunk_47
        LDA &C317
        JSR LB946
-       LDA #&00
-       STA &B4
+       STZ &B4
        LDA #&C3
        STA &B5
        JSR LB8BC
@@ -8180,9 +8016,7 @@ ENDIF
        ADC #&30
        JMP LB8A5
 ;;
-.LB94F JSR LB86B
-       LDA #&01
-       JSR LB8A5
+.LB94F JSR chunk_47
        LDA &C31B
        JSR LB946
        LDA #&0A
@@ -8218,8 +8052,8 @@ ENDIF
        BCC LB98F
 .LB99A STY &B5
        STA &B4
-.LB99E LDY #&00
-       LDA (&B4),Y
+.LB99E 
+       jsr ldy_0_lda_b4_y
        STA &C2B5
        BEQ LB9BB
        JSR LB8BC
@@ -8239,19 +8073,25 @@ ENDIF
        LDA &B1
        STA (&C6),Y
        JMP LB925
+
+.dex_4
+       DEX
+       DEX
+       DEX
+       DEX
+.RTS14
+       RTS
+
 ;;
 .LB9CA LDA &C2B6
        CMP &C2B7
-       BNE LB9D3
-       RTS
+       BEQ RTS14
 ;;
 .LB9D3 BIT &CD
        BPL LBA03
-       LDA &C2BA
-       LDX &C2BB
-       JSR L8053
-       LDA &C2BA
-       CMP #&FE
+
+       JSR chunk_7
+
        BCC LB9ED
        LDA &C2BB
        INC A
@@ -8259,8 +8099,7 @@ ENDIF
 .LB9ED LDA #&40
        TSB &CD
        JSR L8032
-       LDA &C2B4
-       CMP #&03
+       JSR chunk_34
        LDA #&00
        ROL A
        LDX #&B8
@@ -8273,8 +8112,7 @@ ENDIF
        LDA &C2B9
        SBC #&00
        STA &B3
-       LDA &C2B4
-       CMP #&03
+       JSR chunk_34
        LDY &C2B6
        PHP
 .LBA1C PLP
@@ -8301,26 +8139,6 @@ ENDIF
        PLP
        JMP L803A
 ;;
-IF INCLUDE_FLOPPY
-;;
-;;
-;; ACCESS FLOPPY CONTROLLER
-;; ========================
-;;
-;; Pass SCSI command to floppy controller
-;; --------------------------------------
-.LBA4B JMP LBB46        ;; Do a SCSI action with floppy drive
-;;
-.LBA4E JMP LBB57
-;;
-.LBA51 JMP LBA5D
-;;
-.LBA54 JMP LBA61
-;;
-ENDIF
-.LBA57 LDA #&FF
-       STA &C2E4
-       RTS
 IF INCLUDE_FLOPPY
 ;;
 .LBA5D LDA #&40
@@ -8370,28 +8188,21 @@ IF INCLUDE_FLOPPY
        LDA &C202,X
        TAX
        PLA
-       LDY #&FF
-       JSR LBFAB
-       STA &A4
-       STY &A5
-       TYA
-       SEC
-       SBC #&50
+
+       JSR chunk_11
+
        BMI LBACF
        STA &A5
        JSR LBD40
-.LBACF LDA &0D5E
-       STA &FE24        ;; Drive control register
+.LBACF JSR chunk_36
        ROR A
        BCC LBAE4
        LDA &C2E5
-       STA &A3
-       BIT &C2E4
+       JSR chunk_37
        BPL LBAF1
        BMI LBAEE
 .LBAE4 LDA &C2E6
-       STA &A3
-       BIT &C2E4
+       JSR chunk_37
        BVC LBAF1
 .LBAEE JSR LBD55
 .LBAF1 JSR LBAFA
@@ -8410,8 +8221,9 @@ IF INCLUDE_FLOPPY
        LDA #&01
        TSB &C2E4
        LDA #&14
-       ORA &0D5C
-       STA &FE28        ;; FDC Status/Command
+
+       JSR chunk_13
+
        JSR LBCE5
        LDA &A1
        ROR A
@@ -8501,8 +8313,15 @@ IF INCLUDE_FLOPPY
        JSR LBBBE
        JMP LBF0A
 ;;
-.LBBBE JSR LBC01
+.LBBBE 
+			;; Claim NMI space
+       LDA #&8F
+       LDX #&0C
+       LDY #&FF
+       JSR &FFF4        ;; Claim NMI space
+       STY &C2E1        ;; Store previous owner's ID
        LDA &C2E8
+
        STA &0D5C
        STZ &A0          ;; Clear error
        STZ &A2
@@ -8512,42 +8331,7 @@ IF INCLUDE_FLOPPY
        STA &A1
        LDA &CD
        STA &0D5D
-       JSR LBC18
-       RTS
-;;
-.LBBDE STZ &0D56
-       STZ &C2E8
-       LDX #&0B
-       LDA #&A1
-       JSR &FFF4
-       TYA
-       PHA
-       AND #&02
-       BEQ LBBF6
-       LDA #&03
-       STA &C2E8
-.LBBF6 PLA
-       AND #&01
-       BEQ LBC00
-       LDA #&02
-       STA &0D56
-.LBC00 RTS
-;;
-;; Claim NMI space
-;; ---------------
-.LBC01 LDA #&8F
-       LDX #&0C
-       LDY #&FF
-       JSR &FFF4        ;; Claim NMI space
-       STY &C2E1        ;; Store previous owner's ID
-       RTS
-;;
-;; Release NMI space
-;; -----------------
-.LBC0E LDY &C2E1        ;; Get previous owner's ID
-       LDA #&8F
-       LDX #&0B
-       JMP &FFF4        ;; Release NMI
+       ;; SAVING: 3 bytes
 ;;
 ;; Copy NMI code to NMI space
 ;; --------------------------
@@ -8578,6 +8362,26 @@ IF INCLUDE_FLOPPY
        LDA &F4
        STA &0D32
        RTS
+       			;; SAVING: 1 byte
+;;
+.LBBDE STZ &0D56
+       STZ &C2E8
+       LDX #&0B
+       LDA #&A1
+       JSR &FFF4
+       TYA
+       PHA
+       AND #&02
+       BEQ LBBF6
+       LDA #&03
+       STA &C2E8
+.LBBF6 PLA
+       AND #&01
+       BEQ LBC00
+       LDA #&02
+       STA &0D56
+.LBC00 RTS
+;;
 ;;
 .LBC54 LDA &A1
        ROL A
@@ -8649,9 +8453,8 @@ IF INCLUDE_FLOPPY
        BVC LBCC4
        LDA &F4
        PHA
-       LDA #&00
-       STA &F4
-       STA &FE30
+       STZ &F4
+       STZ &FE30
        PHX
        JSR LBE77
        PLX
@@ -8698,7 +8501,7 @@ IF INCLUDE_FLOPPY
 .LBD2F LDA #&80
 .LBD31 JSR LBD62
        STA &FE28        ;; FDC Status/Command
-       JMP LBCE5
+       BRA LBCE5
 ;;
        LDA #&10
        TRB &0D5E        ;; Set side 0
@@ -8709,22 +8512,17 @@ IF INCLUDE_FLOPPY
        RTS
 ;;
 .LBD46 LDA #&01
-       TRB &A2
-       RTS
-;;
-.LBD4B LDA #&08
+.trb_a2_rts
        TRB &A2
        RTS
 ;;
 .LBD50 LDA #&02
-       TRB &A2
-       RTS
+       BRA trb_a2_rts
 ;;
 .LBD55 LDA #&00
        STA &A3
-       ORA &0D5C
-       STA &FE28        ;; FDC Status/Command
-       JMP LBCE5
+       JSR chunk_13
+       BRA LBCE5
 ;;
 .LBD62 ROR &C2E4
        BCC LBD6A
@@ -8744,8 +8542,7 @@ IF INCLUDE_FLOPPY
        STA &A5
        LDA &C217
        STA &A6
-       LDA #&00
-       STA &A3
+       STZ &A3
        LDA &C2E2
        STA &A4
        BIT &CD
@@ -8768,6 +8565,16 @@ IF INCLUDE_FLOPPY
        BNE LBDAE
 .LBDB6 PLA
        STA &A3
+       RTS
+
+.chunk_11
+       LDY #&FF
+       JSR LBFAB
+       STA &A4
+       STY &A5
+       TYA
+       SEC
+       SBC #&50
        RTS
 ;;
 .LBDBA JSR LBAFA
@@ -8837,20 +8644,19 @@ IF INCLUDE_FLOPPY
        JSR LBD46
        JSR LBD50
        LDA #&54
-       ORA &0D5C
-       STA &FE28        ;; FDC Status/Command
+       JSR chunk_13
        INC &A3
        BNE LBE41
 .LBE5C LDA &A2
        AND #&08
        BEQ LBE90
        JSR LBD46
-       JSR LBD4B
+       LDA #&08
+       TRB &A2
        INC &A3
        JSR LBD40
        LDA #&00
-       ORA &0D5C
-       STA &FE28        ;; FDC Status/Command
+       JSR chunk_13
        BPL LBE41
 ;;
 ;; NMI Routine - called from &0D00
@@ -8878,7 +8684,7 @@ IF INCLUDE_FLOPPY
        LDX #&00
        BEQ LBF09
 .LBEA4 DEC &0D59
-       JMP LBEFB
+       BRA LBEFB
 ;;
 .LBEAA LDA &0D5A
        BNE LBEF2
@@ -8891,13 +8697,12 @@ IF INCLUDE_FLOPPY
        AND #&10
        BEQ LBEC7
        LDX #&00
-       JMP LBEFD
+       BRA LBEFD
 ;;
 .LBEC7 LDA #&FF
        STA &A3
        JSR LBD40
-       LDA &0D5E
-       STA &FE24        ;; Drive control
+       JSR chunk_36
        LDA &A2
        ORA #&08
        BNE LBEDE
@@ -8913,7 +8718,7 @@ IF INCLUDE_FLOPPY
        LDX #&00
        BEQ LBEFD
 .LBEF2 DEC &0D5A
-       JMP LBEFB
+       BRA LBEFB
 ;;
 .LBEF8 DEC &0D58
 .LBEFB LDX #&FF
@@ -8923,6 +8728,7 @@ IF INCLUDE_FLOPPY
        CMP &FE2A        ;; Keep storing until it stays there
        BNE LBEFF
 .LBF09 RTS
+
 ;;
 ;;   &A0  Returned error, &40+FDC status or &40+scsi error
 ;;   &A1  b7=write/read, b5=??, b0=error occured?
@@ -8933,13 +8739,11 @@ IF INCLUDE_FLOPPY
 ;;   &A6 drive
 ;;   &A7
 ;;
-.LBF0A LDY #&06
-       LDA (&B0),Y      ;; Get drive
-       ORA &C317        ;; OR with current drive
+.LBF0A 
+       JSR chunk_14
        STA &A6          ;; Store drive in &A6
        AND #&1F         ;; Lose drive bits
-       BEQ LBF1A
-       JMP LBF6F        ;; If sector>&FFFF, jump to 'Sector out of range'
+       BNE LBF6F        ;; If sector>&FFFF, jump to 'Sector out of range'
 ;;
 .LBF1A BIT &A6          ;; Check drive
        BVC LBF24        ;; Drive 0,1,4,5 -> jump ahead
@@ -8960,69 +8764,32 @@ IF INCLUDE_FLOPPY
        LDA #&01
        TSB &C2E4
        JSR LBF5E        ;; Calculate sector/track
-       LDA &0D5E        ;; Get drive control byte
-       STA &FE24        ;; Set drive control register
+       JSR chunk_36
        ROR A            ;; Rotate drive 1 bit into carry
        BCC LBF50        ;; Jump if drive 0
        LDA &C2E5
-       STA &A3
-       BIT &C2E4
-       BPL LBF5D
+       JSR chunk_37
+       BPL LBF09
        BMI LBF5A
 ;;
 .LBF50 LDA &C2E6
-       STA &A3
-       BIT &C2E4
-       BVC LBF5D
-.LBF5A JSR LBD55
-.LBF5D RTS
+       JSR chunk_37
+       BVC LBF09
+.LBF5A JMP LBD55
+			;; SAVING: 1 byte
 ;;
 .LBF5E LDY #&07
        LDA (&B0),Y      ;; Get sector b8-b15
        CMP #&0A         ;; Check for sector &0A00
-       BCC LBF8F        ;; <&A00 - sector within range
-;;                                         Bug, the rest of these checks shouldn't happen
-;;                                         Should just drop straight into 'Sector out of range'
-       BNE LBF6F        ;; >&AFF - sector out of range
-       INY              ;; Check sector &0Axx for some reason
-       LDA (&B0),Y      ;; Get sector b0-b7
-       CMP #&00         ;; Sector &A00?
-       BCC LBF75        ;; Will never follow this jump - should this be BEQ ?
-.LBF6F LDA #&61         ;; Floppy error &21 (Bad address)
-       STA &A0
-;;
-;; Jump to return floppy error
-;; ---------------------------
-.LBF73 BNE LBFB7        ;; Jump to return error in &A0
-;;
-;; This code never entered, as the above BCC LBF75 never followed
-.LBF75 LDA &A1          ;; Get flag
-       AND #&10
-       BEQ LBF8F        ;; If b3=0, do it anyway
-       LDY #&09
-       LDA (&B0),Y      ;; Get count
-       DEY              ;; Point to sector b0-b7
-       CLC
-       ADC (&B0),Y      ;; A=sector.b0-7 + count
-       BCS LBF89        ;; >255, jump to volume error
-       CMP #&01
-       BCC LBF8F        ;; sector+count<1 - do it
-.LBF89 LDA #&63         ;; Floppy error &23 (Volume error)
-       STA &A0
-       BNE LBFB7        ;; Jump to return error
+       BCS LBF6F	;; >=&A00 - sector not within range
+                        ;; <&A00 - sector within range
 ;;
 .LBF8F LDY #&07
        LDA (&B0),Y      ;; Get sector b8-b15
        TAX              ;; Pass to X
        INY
        LDA (&B0),Y      ;; Get sector b0-b7
-       LDY #&FF
-       JSR LBFAB        ;; Divide by 16
-       STA &A4          ;; A=sector
-       STY &A5          ;; Y=track 0-159
-       TYA
-       SEC
-       SBC #&50         ;; Track <80?
+       JSR chunk_11
        BMI LBFB6        ;; Side 0, leave track as 0-79
        STA &A5          ;; Store track 0-79
        JMP LBD40        ;; Set side 1
@@ -9042,6 +8809,11 @@ IF INCLUDE_FLOPPY
        BPL LBFAB
        ADC #&10
 .LBFB6 RTS
+;;                                         Bug, the rest of these checks shouldn't happen
+;;                                         Should just drop straight into 'Sector out of range'
+.LBF6F LDA #&61         ;; Floppy error &21 (Bad address)
+       STA &A0
+.LBF73 
 ;;
 ;; Drive 2,3,6,7
 ;; -------------
@@ -9067,7 +8839,13 @@ IF INCLUDE_FLOPPY
 ;;
 .LBFE1 LDA &A0          ;; Get error
        STA &C2E3        ;; Store in error block
-       JSR LBC0E        ;; Release NMI
+
+			;; Release NMI space
+       LDY &C2E1        ;; Get previous owner's ID
+       LDA #&8F
+       LDX #&0B
+       JSR &FFF4        
+
 .LBFE9 JSR L803A        ;; Release Tube, restore screen
        LDX &B0
        LDA &C2E3        ;; Get error
@@ -9080,10 +8858,197 @@ IF INCLUDE_FLOPPY
        RTS              ;; Return with A=error, EQ=Ok
 ;;
 IF NOT(TEST_SHIFT)
-       EQUB &A9
 ENDIF
 
 ENDIF
+
+.lda_c314_y_sta_c22c_y_dey
+       LDA &C314,Y
+.sta_c22c_y_dey
+       STA &C22C,Y
+       DEY
+       RTS
+
+.lda_40_sta_b8_lda_c2_sta_b9
+       LDA #&40
+.sta_b8_lda_c2_sta_b9
+       STA &B8
+       LDA #&C2
+       STA &B9
+       RTS
+	
+.lda_b6_y_ora_80_sta_b6_y
+       LDA (&B6),Y
+       ORA #&80
+       STA (&B6),Y
+       RTS
+
+.clc_lda_b6_adc_1a_sta_b6
+       CLC
+.lda_b6_adc_1a_sta_b6
+       LDA &B6
+       ADC #&1A
+       STA &B6
+       RTS
+
+.chunk_1
+       LDA &00,X
+       STA &C29A
+       LDA &01,X
+       STA &C29B
+       LDA &02,X
+       STA &C29C
+       LDA &03,X
+       STA &C29D
+       JSR LAE68
+       LDX &C3
+       LDY &CF
+       LDA &00,X
+       RTS
+
+.chunk_2
+       CLC
+       LDA &C3CA,X
+       ADC &C370,X
+       STA &C296
+       LDA &C3C0,X
+       ADC &C366,X
+       STA &C297
+       LDA &C3B6,X
+       ADC &C35C,X
+       STA &C298        ;; &C296/7/8=&C3CA/B/C,X+&C370/1/2,X
+       RTS
+
+.chunk_3
+       STA &C21A
+       LDA &C314
+       STA &C21D
+       LDA &C315
+       STA &C21C
+       LDA &C316
+       STA &C21B
+       RTS
+
+.chunk_5
+       LDY #&00         ;; Copy filename address again
+       LDA (&B8),Y
+       STA &B4
+       INY
+       LDA (&B8),Y
+       STA &B5
+       RTS
+
+.chunk_6
+       STA &C298
+       LDA #&02
+       CMP &C2B4
+       LDA #&80
+       ROR A
+       JMP LABE7
+
+.chunk_7
+       LDA &C2BA
+       LDX &C2BB
+       JSR L8053
+       LDA &C2BA
+       CMP #&FE
+       RTS
+
+.chunk_8
+       LDA &C3B6,X
+       AND #&E0
+       CMP &C317
+       RTS
+
+.chunk_9
+       LDA &B4
+       STA &C240
+       LDA &B5
+       STA &C241
+       JMP lda_40_sta_b8_lda_c2_sta_b9
+
+.chunk_10
+       LDA #&FF
+       STA &C22E
+       STA &C22F
+       RTS
+
+.chunk_12
+       LDA &C317
+       JMP LB5C5        ;; X=(A DIV 16)
+
+.chunk_13
+       ORA &0D5C
+       STA &FE28        ;; FDC Status/Command
+       RTS
+
+.chunk_14
+       LDY #&06
+       LDA (&B0),Y      ;; Get drive
+       ORA &C317        ;; OR with current drive
+       RTS
+
+.chunk_15
+       INX
+       INY
+       CPY #&03
+       RTS
+;;
+
+.chunk_16
+       LDA L883C,X
+       STA &C215,X
+       DEX
+       RTS
+ 
+.chunk_17
+       LDA (&B6),Y
+       STA &C21B,X
+       STA &C2FE,Y
+       INY
+       DEX
+       RTS
+
+.chunk_40
+       LDA (&B6),Y
+       AND #&7F
+       RTS
+
+.chunk_42
+       LDA #&05
+       STA &B6
+       LDA #&C4
+       STA &B7
+       RTS
+
+.chunk_43
+       LDA (&B4),Y      ;; Get current character
+       CMP #&20         ;; Is it a space?
+       RTS
+
+.chunk_44
+       JSR LABE7        ;; Manipulate various things
+       LDX &CF
+       LDY &C37A,X
+       RTS
+
+.chunk_45
+       LDA &C3A2,X
+       CMP #&01
+       LDA &C398,X
+       RTS
+
+.chunk_46
+       INY
+       LDA &C8D9,Y
+       AND #&7F
+       CMP #&20
+       RTS
+
+.chunk_47
+       JSR LB86B
+       LDA #&01
+       JMP LB8A5
 
 ;; This is cludge, need to check this is really not used in IDE Mode
 IF PATCH_IDE OR PATCH_SD

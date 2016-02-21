@@ -1,6 +1,7 @@
 ;; ADFS MMC Card Driver
 ;; (C) 2015 David Banks
 ;; Based on code from MMFS ROM by Martin Mather
+;; 20-Feb-2016 JGH: Corrected error numbers
 
 trys%=&32
 
@@ -27,7 +28,7 @@ write_block      =&58
      ORA #&40  ;; Setting bit 6 in the fault code will ensure it's printed
      TAX
      JSR L8374 ;; This version prints the fault code in X
-     EQUB &C5
+     EQUB &C7
      EQUS "MMC Read fault"
      EQUB &00
 
@@ -35,7 +36,7 @@ write_block      =&58
      ORA #&40  ;; Setting bit 6 in the fault code will ensure it's printed
      TAX
      JSR L8374 ;; This version prints the fault code in X
-     EQUB &C5
+     EQUB &C7
      EQUS "MMC Write fault"
      EQUB &00
 
@@ -185,7 +186,7 @@ write_block      =&58
      ;; Failed to set block length
 .blkerr
      JSR L8372
-     EQUB &CD
+     EQUB &CD     ;; &CD='Drive not ready'
      EQUS "MMC Set block len error"
      EQUB &00
 }
@@ -214,7 +215,7 @@ write_block      =&58
 ;; Failed to initialise card!
 .carderr
      JSR L8372
-     EQUB &CD
+     EQUB &CD     ;; &CD='Drive not ready'
      EQUS "Card?"
      EQUB &00
      
@@ -321,14 +322,14 @@ write_block      =&58
 
 .invalidDrive
      JSR L8372        ;; Generate error
-     EQUB &A9         ;; ERR=169
-     EQUS "Invalid drive"
+     EQUB &D2         ;; ERR=210
+     EQUS "Drive not present"
      EQUB &00
 
 .overflow
      JSR L8372        ;; Generate error
-     EQUB &A9         ;; ERR=169
-     EQUS "Sector overflow"
+     EQUB &C7         ;; ERR=199
+     EQUS "Sector not found"
      EQUB &00
 }
 
@@ -403,7 +404,7 @@ write_block      =&58
 ;; 0C-0F = Number of sectors in partition
 
      LDA #<(mbrsector% + &1BE)  ;; The start of the first partition entry
-     STA datptr%                ;; is offset &1BE into the MBR
+     STA datptr%+0              ;; is offset &1BE into the MBR
      LDA #>(mbrsector% + &1BE)
      STA datptr%+1
 
@@ -446,13 +447,13 @@ write_block      =&58
 
 .noMBR
      JSR L8372
-     EQUB &CD
-     EQUS "No MBR!"
+     EQUB &CD                   ;; ERR 205='Drive not ready'
+     EQUS "No MBR"
      EQUB &00
     
 .noADFS
      JSR L8372
-     EQUB &CD
-     EQUS "No ADFS partitions!"
+     EQUB &CD                   ;; ERR 205='Drive not ready'
+     EQUS "No ADFS partitions"
      EQUB &00
 }
