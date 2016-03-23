@@ -9,6 +9,29 @@ CPU 1
 ;;               DISASSEMBLY COMMENTARY COPYRIGHT J.G.HARSTON
 ;;               ============================================
 ;;
+
+VERSION=150
+IF PATCH_PRESERVE_CONTEXT
+VERSION=VERSION+1
+ENDIF
+IF PATCH_IDE
+VERSION=VERSION+2
+ENDIF
+IF PATCH_SD
+VERSION=VERSION+4
+ENDIF
+; Version number x.yz
+;                1.0z = Electron
+;                1.3z = BBC B/B+
+;                1.5z = Master
+;             z=%abcd
+;                |||+---preserve context on break
+;                |00----SCSI drivers
+;                |01----IDE drivers
+;                |10----User port MMC drivers
+;                |11----reserved
+;                +------reserved
+
 ;; ROM HEADER
 ;; ==========
        EQUB &00,&00,&00 ;; No language entry
