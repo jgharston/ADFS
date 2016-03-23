@@ -24,4 +24,5 @@ Removes Break+-> option when KEEP_REDUNDANT=FALSE.
 
 MMC.asm, 20-Feb-2016
 --------------------
-Corrected error numbers.
+Corrected error numbers. Shouldn't be errors, should be return results.
+
