@@ -10,16 +10,7 @@ CPU 1
 ;;               ============================================
 ;;
 
-VERSION=150
-IF PATCH_PRESERVE_CONTEXT
-VERSION=VERSION+1
-ENDIF
-IF PATCH_IDE
-VERSION=VERSION+2
-ENDIF
-IF PATCH_SD
-VERSION=VERSION+4
-ENDIF
+VERSION=150 + (PATCH_PRESERVE_CONTEXT AND 1) + (PATCH_IDE AND 2) + (PATCH_SD AND 4)
 ; Version number x.yz
 ;                1.0z = Electron
 ;                1.3z = BBC B/B+
