@@ -2,6 +2,9 @@
 ;; (C) 2015 David Banks
 ;; Based on code from MMFS ROM by Martin Mather
 ;; 20-Feb-2016 JGH: Corrected error numbers
+;; None of these should be errors, they should be return results
+;;  otherwise, eg OSWORD &72 bombs out instead of returning a result.
+
 
 trys%=&32
 
@@ -25,6 +28,7 @@ write_block      =&58
      JMP MMC_SendingData
 
 .errRead
+;;; Should be a return with A=???
      ORA #&40  ;; Setting bit 6 in the fault code will ensure it's printed
      TAX
      JSR L8374 ;; This version prints the fault code in X
@@ -33,6 +37,7 @@ write_block      =&58
      EQUB &00
 
 .errWrite
+;;; Should be a return with A=???
      ORA #&40  ;; Setting bit 6 in the fault code will ensure it's printed
      TAX
      JSR L8374 ;; This version prints the fault code in X
@@ -186,6 +191,7 @@ write_block      =&58
      ;; Failed to set block length
 .blkerr
      JSR L8372
+;;; Should be a return with A=&04
      EQUB &CD     ;; &CD='Drive not ready'
      EQUS "MMC Set block len error"
      EQUB &00
@@ -215,6 +221,7 @@ write_block      =&58
 ;; Failed to initialise card!
 .carderr
      JSR L8372
+;;; Should be a return with A=&04
      EQUB &CD     ;; &CD='Drive not ready'
      EQUS "Card?"
      EQUB &00
@@ -321,12 +328,14 @@ write_block      =&58
      RTS
 
 .invalidDrive
+;;; Should be a return with A=???
      JSR L8372        ;; Generate error
      EQUB &D2         ;; ERR=210
      EQUS "Drive not present"
      EQUB &00
 
 .overflow
+;;; Should be a return with A=&21
      JSR L8372        ;; Generate error
      EQUB &C7         ;; ERR=199
      EQUS "Sector not found"
@@ -452,6 +461,7 @@ write_block      =&58
      EQUB &00
     
 .noADFS
+;;; Should be a return with A=???
      JSR L8372
      EQUB &CD                   ;; ERR 205='Drive not ready'
      EQUS "No ADFS partitions"
