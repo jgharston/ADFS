@@ -1,7 +1,7 @@
 ; Build file for BBC ADFS with SCSI drivers
 ; -----------------------------------------
 
-TARGETOS=2		; 2=Master
+TARGETOS=2		; 2=BBC B/B+
 FLOPPY=TRUE		; Floppy drivers
 HD_SCSI=TRUE		; SCSI drivers
 HD_IDE=FALSE
