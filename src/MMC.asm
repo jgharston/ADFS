@@ -11,19 +11,15 @@
 ; MMC_BEGIN redefined interface to destroy all registers, returns result,
 ; falls through to MMC_INIT to initialise and return result.
 ; setCommandAddress returns error result on failure.
-; StartRead/Write return error result on failure - need to translate result.
-
-; return values, need to work out which appropriate
-; &00 - ok
-; &04 - not ready
-; &08 - communication failure
-; &3A - not ready, media not present
+; StartRead/Write return error result on failure.
+; MMC return codes translated to ADFS return codes.
 
 
 trys%=&32
 
 go_idle_state    =&40
 send_op_cond     =&41
+mmc_command_48   =&48
 send_cid         =&4A
 set_blklen       =&50
 read_single_block=&51
@@ -33,7 +29,7 @@ write_block      =&58
 ; MMC_BEGIN - Initialise MMC card
 ; *******************************
 ; Returns EQ, A=0 ok
-;         NE, A<>0 - failed
+;         NE, A=MMC error code, failed
 ; Corrupts X,Y
 .MMC_BEGIN
 {
@@ -48,7 +44,7 @@ write_block      =&58
 ; MMC_INIT - Initialise MMC card
 ; ******************************
 ; Returns EQ, A=0 if ok
-;         NE, A=result if card can't be initialised
+;         NE, A=ADFS error code, card can't be initialised
 ; Corrupts X,Y
 .MMC_INIT
 {
@@ -74,9 +70,9 @@ ENDIF
      STA cmdseq%+6                   ; token (crc7)
      JSR MMC_DoCommand
      AND #&81                        ; ignore errors
-     CMP #1
+     CMP #1                          ; b0='idle state'
      SEC
-     BNE il10
+     BNE il10                        ; not idle, fail this attempt
 .il0
      LDA #&01
      STA cardsort%
@@ -99,14 +95,14 @@ ENDIF
      LDA #send_op_cond
      JSR MMC_SetCommand
      JSR MMC_DoCommand
-     CMP #2
+     CMP #2                          ; anything other that 'idle'
 .il10
-     BCS ifail
+     BCS ifail                       ; not idle, fail this attempt
 .il11
      BIT EscapeFlag                  ; may hang
      BMI ifail
      CMP #0
-     BNE il1
+     BNE il1                         ; not 'ok', try again
      LDA #&02
      STA cardsort%
      BNE iok
@@ -165,13 +161,43 @@ ENDIF
      JMP iloop
 
 .ifaildone
-     LDA #&04	;; Card not responding
-     RTS        ;; NE=Failed
-
 .blkerr
-     LDA #&04	;; Can't set up block size
-     RTS        ;; NE=Failed
 }
+.translate_error
+     LDX #&FF
+.translate_lp
+     INX
+     LSR A
+     BCC translate_lp
+     LDA translate_table,X
+     RTS        ;; NE=Failed, return ADFS error code
+     ; MMC_DoCommand R1 response codes
+.translate_table
+     EQUB &00	; b0 = In idle state        -> No error
+     EQUB &2F	; b1 = Erase reset          -> Abort
+     EQUB &27	; b2 = Illegal command
+     EQUB &20	; b3 = Command CRC error
+     EQUB &05	; b4 = Erase Sequence error -> Malformed command
+     EQUB &21	; b5 = Address error
+     EQUB &24	; b6 = Parameter error
+     EQUB &7F	; b7 = 0                    -> Unknown
+
+
+; **** Begin Read Transaction ****
+; On exit, EQ=Ok
+;          NE, A=translated error code
+.MMC_StartRead
+     JSR MMC_DoCommand
+     BNE translate_error
+     JMP MMC_WaitForData
+
+; **** Begin Write Transaction ****
+; On exit, EQ=Ok
+;          NE, A=translated error code
+.MMC_StartWrite
+     JSR MMC_DoCommand
+     BNE translate_error
+     JMP MMC_SendingData
 
 
 ;; **** Set up MMC command sequence ****
@@ -221,7 +247,7 @@ ENDIF
 ;; ************************************************
 ;; On entry, X=>offset from &C200 to random access info
 ;; On exit,  EQ A=0  - ok
-;;           NE A<>0 - failed
+;;           NE A<>0 - failed, returns ADFS error code
 ;; Corrupts X,Y
 .setRandomAddress
 {
@@ -348,26 +374,6 @@ ENDIF
 }
 
 
-;; **** Begin Read Transaction ****
-.MMC_StartRead
-     JSR MMC_DoCommand
-     BNE errRead
-     JMP MMC_WaitForData
-
-;; **** Begin Write Transaction ****
-.MMC_StartWrite
-     JSR MMC_DoCommand
-     BNE errWrite
-     JMP MMC_SendingData
-
-.errRead
-.errWrite
-;; Need to convert MMC error response code into a SCSI error response code
-;; For the moment, just wop it up high
-     ORA #&80
-     RTS
-
-
 .initializeDriveTable
 {
 ;; Load 512b sector 0 (MBR) to &C000-&C1FF
@@ -376,12 +382,12 @@ ENDIF
 ;; This is done during filing system selection, so generating errors would leave
 ;; system in an inconsistant state.
 ;
-     JSR MMC_BEGIN      ;; Initialize the card, if not already initialized
-; may return an error
-     CLC                ;; C=0 for Read
+     JSR MMC_BEGIN      ; Initialize the card, if not already initialized
+     BNE init_exit	; Couldn't initialise
+     CLC                ; C=0 for Read
      JSR MMC_SetupRW
      JSR MMC_StartRead
-; may return an error
+     BNE init_exit	; Couldn't read
      LDA #<mbrsector%
      STA datptr% + 0
      LDA #>mbrsector%
@@ -450,12 +456,13 @@ ENDIF
      TXA                        ;; Did we find any ADFS partitions?
      BEQ noADFS                 ;; No, then fatal error
      LDA #&00			;; A='Ok'
+.init_exit
      RTS
 
 .noMBR
-     LDA #&3F			;; A='No Master Boot Record'
+     LDA #&01			;; A='No Master Boot Record'
      RTS
 .noADFS
-     LDA #&3E			;; A='No ADFS partitions'
+     LDA #&1C			;; A='No ADFS partitions'
      RTS
 }

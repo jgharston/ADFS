@@ -1,16 +1,29 @@
 ; ACORN ADFS ROM SOURCE
 ; =====================
 ; ADFS ORIGINAL CODE BY HUGO TYSON COPYRIGHT ACORN COMPUTERS
-; DISASSEMBLY COMMENTARY COPYRIGHT J.G.HARSTON
+; ASSEMBLY COMMENTARY COPYRIGHT J.G.HARSTON
 ; IDE DRIVERS BY J.G.HARSTON
-; MMC DRIVERS BY HOGLET/ZORNS/STARDOT COMMUNITY
+; MMC DRIVERS BY HOGLET/ZORN/STARDOT COMMUNITY
 ;
 ; Assemble the code by starting the build with one of the master include
 ; files to set up the defines for the required build. This code will
 ; build:
 ; ADFS Master SCSI v1.50r9
 ; ADFS Master IDE  v1.53r21
-; (adding ADFS 1.57 Master MMC)
+; ADFS Master MMC  needs mnore optimisation to fit into 16K
+
+
+; Next: Is data lost check not needed with MMC
+
+
+; OPTIMISE flag sets how hard to optimise
+; 1 Subroutines for ReadCMOS, GetFilename, SetAttr, NextEntry, DiskSpeed
+; 2 Use 65C12 coding where possible
+;
+; Other optimisation options
+;  Convert disk result to error
+;  OSARGS pointer manipulation
+;  High level, really crunch stuff a la Zorn
 
 
 ; Sanity check
@@ -74,7 +87,7 @@ VERSION=VERBASE + (PRESERVE_CONTEXT AND 1) + (HD_IDE AND 2) + (HD_MMC AND 4)
 ;                |11----reserved
 ;                +------reserved
 
-IF TARGETOS>3 AND OPTIMISE>2
+IF TARGETOS>2 AND OPTIMISE>=2
   USE65C12=TRUE		; Squash (zp),0, JMP/BRA, etc. where possible
 ELSE
   USE65C12=FALSE
@@ -460,12 +473,12 @@ IF HD_IDE
 .TransTube
        BCC TubeRead
 .TubeWrite
-       LDA &FEE5
+       LDA TUBEIO
        STA &FC40
        BRA TransferByte
 .TubeRead
        LDA &FC40
-       STA &FEE5
+       STA TUBEIO
        BRA TransferByte
 ;
 .L81AD			;; Aligned to L81AD
@@ -593,12 +606,12 @@ IF HD_SCSI
        JMP L817C        ;; Loop for next 256 bytes
 ;;
 .L819B BCS L81A5        ;; Jump for Tube read
-       LDA &FEE5	;; Get byte from Tube
+       LDA TUBEIO	;; Get byte from Tube
        STA &FC40	;; Write byte to SCSI data port
        BRA L817C        ;; Loop for next byte
 ;;
 .L81A5 LDA &FC40	;; Get byte from SCSI data port
-       STA &FEE5	;; Write to Tube
+       STA TUBEIO	;; Write to Tube
        BRA L817C        ;; Loop for next byte
 ;;
 .L81AD JSR L803A        ;; Release Tube and restore screen
@@ -764,7 +777,7 @@ IF HD_SCSI
 .L8233 NOP              ;; 3xNOP delay for Tube I/O
        NOP
        NOP
-       LDA &FEE5        ;; Read from Tube
+       LDA TUBEIO        ;; Read from Tube
        STA &FC40        ;; Write to SCSI data
        INY
        BNE L8233
@@ -779,7 +792,7 @@ IF HD_SCSI
        NOP
        NOP
        LDA &FC40        ;; Read SCSI data
-       STA &FEE5        ;; Write to Tube
+       STA TUBEIO	;; Write to Tube
        INY
        BNE L824B
        JSR L8200
@@ -850,14 +863,18 @@ ENDIF
 ; &00+xx - hard drive error
 ; &40+xx - floppy error
 ;       &40 Write protected (FDC status &40)
+; &01       No Master Boot Record (disk not formatted)
 ; &02       Drive door open/seek error
 ; &03       Write fault
+; &04       Drive not ready
+; &05       Malformed command
 ; &06       Track 0 not found
 ;       &48 CRC error (FDC status &08)
 ; &10 / &50 Sector not found (FDC status &10)
 ; &11       Data CRC error
 ; &12       Data block not found
 ; &19       Bad track found
+; &1C       No ADFS partitions (bad disk format)
 ; &20 / &60 Bad controller command
 ; &21 / &61 Bad disc address (beyond end of disk)
 ; &22 / &62 unused
@@ -869,13 +886,6 @@ ENDIF
 ; &28       Media changed
 ; &2F / &6F Abort (Escape)
 ;       &7F Unknown result
-; We also need to translate these
-;  MMC card/interface not responding
-;  Can't set block size
-;  Low-level MMC read/write result translated to SCSI result
-;  No Master Boot Record
-;  No ADFS partitions
-; 
 ; See the BeebWiki for full info
 ;
 ; Should ignore FDD flag in bit 6 when checking
@@ -1820,21 +1830,46 @@ ENDIF
        BEQ L8956
 .L8961 LDA #&FF
        RTS
-;;
-;; Step to next directory entry
-;; ----------------------------
-.L8964 CLC           ;; &B6/7=&B6/7+26
-       LDA &B6
-       ADC #&1A
-       STA &B6
-       BCC L896F
-       INC &B7
-.L896F LDY #&00
-       LDA (&B6),Y   ;; Check first byte of entry
-       BEQ L8961     ;; &00 - end of directory
-       JSR L8756     ;; Check directory entry
-       BNE L8964     ;; Step to next entry
-       RTS
+
+; Step to next directory entry
+; ----------------------------
+; Directory pointer at &B6/7=&B6/7+26
+IF OPTIMISE>=1
+.NextEntry
+	LDA #&1A
+.NextEntryA
+	CLC
+	ADC &B6
+	STA &B6
+	BCC NextEntryDone
+	INC &B7
+.NextEntryDone
+IF USE65C12
+	LDA (&B6)	; Check first byte of entry
+ELSE
+	LDY #&00
+	LDA (&B6),Y	; Check first byte of entry
+ENDIF
+	RTS
+ENDIF
+
+.L8964
+IF OPTIMISE<1
+	CLC		; Step to next directory entry
+	LDA &B6		; &B6/7=&B6/7+26
+	ADC #&1A
+	STA &B6
+	BCC L896F
+	INC &B7
+.L896F	LDY #&00
+	LDA (&B6),Y	; Check first byte of entry
+ELSE
+	JSR NextEntry	; Step to next entry, return EQ if at end
+ENDIF
+	BEQ L8961	; &00 - end of directory
+	JSR L8756	; Check directory entry is valid
+	BNE L8964	; Step to next entry
+	RTS
 ;;
 .L897B LDY #&09
        LDA (&B6),Y
@@ -2227,7 +2262,7 @@ ELSE
        BIT &CD          ;; Tube or I/O?
        BVC L8BB5        ;; Jump to read to I/O memory
        JSR L821B        ;; Pause a bit
-       STA &FEE5        ;; Send to Tube
+       STA TUBEIO       ;; Send to Tube
        BVS L8BB7        ;; Jump ahead to loop back
 .L8BB5 STA (&B2),Y      ;; Store byte to I/O
 .L8BB7 DEX              ;; Decrement byte count
@@ -2251,8 +2286,13 @@ ENDIF
 ;;
 ;; If name is '^' or '@', Bad name, otherwise Not found.
 ;; -----------------------------------------------------
-.L8BD3 LDY #&00
-       LDA (&B4),Y      ;; Get first character
+.L8BD3
+IF USE65C12
+	LDA (&B4)	; Get first character
+ELSE
+	LDY #&00
+	LDA (&B4),Y	; Get first character
+ENDIF
        CMP #&5E         ;; Is it '^' - parent directory
        BNE L8BDE        ;; No, skip past
 .L8BDB JMP L8760        ;; Jump to give 'Bad name'
@@ -2280,8 +2320,12 @@ ENDIF
 ;; =================
 .L8C10 JSR L8BBE
        BNE L8BD3
+IF USE65C12
+       LDA (&B6)	;; Check 'R' bit
+ELSE
        LDY #&00		;; Point to first byte of directory entry
        LDA (&B6),Y	;; Check 'R' bit
+ENDIF
        BPL L8BFB	;; No 'R', jump to error
 .L8C1B LDY #&06		;; Point to control block
        LDA (&B8),Y	;; Get file/addr flag
@@ -2405,12 +2449,15 @@ ENDIF
 ;; ======================
 ;; &B8/9=>control block, &B4/5=>filename
 ;;
-.L8CB3 LDY #&00		;; Copy filename address again
+.L8CB3
+IF NOT(TRIM_REDUNDANT)
+       LDY #&00		;; Copy filename address again
        LDA (&B8),Y
        STA &B4
        INY
        LDA (&B8),Y
        STA &B5
+ENDIF
        JSR L8FE8        ;; Search for object
        BNE L8CD1
        LDY #&04
@@ -2426,13 +2473,18 @@ ENDIF
 .L8CCE JSR L8C70
 .L8CD1 JMP L89D5
 ;;
-.L8CD4 LDY #&00		;; Copy filename pointer to &B4/5
-       LDA (&B8),Y	;; Control+0
-       STA &B4
-       INY
-       LDA (&B8),Y	;; Control+1
-       STA &B5
-       JSR L8DC8
+.L8CD4
+IF OPTIMISE<1
+	LDY #&00	; Copy filename pointer to &B4/5
+	LDA (&B8),Y	; Control+0
+	STA &B4
+	INY
+	LDA (&B8),Y	; Control+1
+	STA &B5
+ELSE
+	JSR GetFilename	; Copy filename pointer to &B4/5
+ENDIF
+.L8CDE JSR L8DC8
        JSR L8FE8
        BEQ L8CEC
        JSR L9456
@@ -2605,7 +2657,7 @@ ENDIF
        STA &C227
        LDA &B5
        STA &C228
-       LDA #&B1
+       LDA #&B1		; &B4/5=>&C8B1
        STA &B4
        LDA #&C8
        STA &B5
@@ -2675,24 +2727,37 @@ ENDIF
        PHA
        LDA &B7
        PHA
-.L8EC3 LDA #&05		; Point to start of directory at &C405
-       STA &B6
-       LDA #&C4
-       STA &B7
-.L8ECB LDY #&00
-       LDA (&B6),Y	;; Get first byte of directory entry
-       BEQ L8EF8	;; &00 - end of directory
-       LDY #&19		;; Point to ...
-       LDA (&B6),Y
-       CMP &C8FA
-       BEQ L8EE7
-       CLC		;; Step to next entry
-       LDA &B6		;; &B6/7=&B6/7+26
-       ADC #&1A
-       STA &B6
-       BCC L8ECB
-       INC &B7
-       BCS L8ECB
+
+.L8EC3	LDA #&05	; Point to start of directory at &C405
+	STA &B6
+	LDA #&C4
+	STA &B7
+.L8ECB
+IF USE65C12
+	LDA (&B6),Y	; Get first byte of directory entry
+ELSE
+	LDY #&00
+	LDA (&B6),Y	; Get first byte of directory entry
+ENDIF
+	BEQ L8EF8	; &00 - end of directory
+.L8ECF	LDY #&19	; Point to ...
+	LDA (&B6),Y
+	CMP &C8FA
+	BEQ L8EE7
+IF OPTIMISE<1
+	CLC		;; Step to next entry
+	LDA &B6		;; &B6/7=&B6/7+26
+	ADC #&1A
+	STA &B6
+	BCC L8ECB
+	INC &B7
+	BCS L8ECB
+ELSE
+	JSR NextEntry	; Step to next entry
+	BNE L8ECF	; Not end of directory, loop back
+	BEQ L8EF8	; End of directory
+ENDIF
+
 .L8EE7 LDA &C8FA
        CLC
        SED
@@ -3210,14 +3275,37 @@ ENDIF
        LDA L9271+0,X
        PHA		;; Stack low byte of address-1
        PHY              ;; Stack function
+IF OPTIMISE<1
        LDY #&00		;; Get filename address
        LDA (&B8),Y
        STA &B4
        INY
        LDA (&B8),Y
        STA &B5		;; &B4/5=>filename
+ELSE
+	JSR GetFilename
+ENDIF
        PLA              ;; Get function to A
 .L9270 RTS              ;; Jump to subroutine
+
+IF OPTIMISE>=1
+; Get filename address from control block to &B4/5
+; ------------------------------------------------
+.GetFilename
+IF USE65C12
+	LDA (&B8)	; Get filename address
+	STA &B4
+	LDY #&01
+ELSE
+	LDY #&00	; Get filename address
+	LDA (&B8),Y
+	STA &B4
+	INY
+ENDIF
+	LDA (&B8),Y
+	STA &B5		;; &B4/5=>filename
+	RTS
+ENDIF
 ;;
 ;; On dispatch, (&B8)=>control block, (&B4)=>filename, A=function, Y=1, X=corrupted
 ;; Subroutine should return A=filetype, XY=>control block
@@ -3276,9 +3364,9 @@ ENDIF
        TAY
        LDA #&00
        ADC &B7
-       PHA
+       PHA		; Push address to stack
        PHY
-       RTS
+       RTS		; Jump to address via stack
 ;;
 .L92CB PHA
        TXA
@@ -3301,9 +3389,9 @@ ENDIF
 ;;
 ;; Print filename, access, cycle number
 ;; ====================================
-.L92E5 LDX #&0A
-       JSR L928F
-       JSR LA036
+.L92E5 LDX #&0A		; Print 10 characters
+       JSR L928F	; Print filename at (&B6)
+       JSR LA036	; Print a space
        LDY #&04         ;; Point to access bits
        LDX #&03         ;; Allow three characters padding
 .L92F1 LDA (&B6),Y      ;; Get access bit
@@ -3413,26 +3501,43 @@ ENDIF
        JSR L9478
 .L93DB JSR L9331
        LDA #&04
-       STA &C22B
-.L93E3 LDY #&00
-       LDA (&B6),Y	;; Check first byte of entry
-       BEQ L940C	;; &00 - end of directory
-       JSR L92E5
-       DEC &C22B
-       BNE L93FC
-       LDA #&04
-       STA &C22B
-       JSR LA03A
-       JMP L93FF
+       STA &C22B	; Display in four columns
+
+.L93E3
+IF USE65C12
+	LDA (&B6)	; Check first byte of entry
+ELSE
+	LDY #&00
+	LDA (&B6),Y	; Check first byte of entry
+ENDIF
+	BEQ L940C	; &00 - end of directory
+.L93E9	JSR L92E5	; Print filename, access, cycle
+	DEC &C22B	; Decrement number of columns
+	BNE L93FC	; Not done four columns yet
+	LDA #&04
+	STA &C22B	; Reset to four columns
+	JSR LA03A	; Print newline without spooling
+IF USE65C12
+	BRA L93FF	; Step to next entry
+ELSE
+	JMP L93FF	; Step to next entry
+ENDIF
 ;;
-.L93FC JSR LA036
-.L93FF CLC		;; Step to next entry
-       LDA &B6		;; &B6/7=&B6/7+26
-       ADC #&1A
-       STA &B6
-       BCC L93E3
-       INC &B7
-       BCS L93E3
+.L93FC	JSR LA036	; Print a space without spooling
+.L93FF
+IF OPTIMISE<1
+	CLC		; Step to next entry
+	LDA &B6		; &B6/7=&B6/7+26
+	ADC #&1A
+	STA &B6
+	BCC L93E3
+	INC &B7
+	BCS L93E3
+ELSE
+	JSR NextEntry	; Step to next entry
+	BNE L93E9	; Not end of directory, loop back
+ENDIF
+
 .L940C LDA &C22B
        CMP #&04
        BEQ L9423
@@ -3440,9 +3545,9 @@ ENDIF
        JSR &FFF4	;; Read POS/VPOS
        TXA		;; Check POS
        BNE L9420	;; POS>0, skip past
-       LDA #&0B		;; POS=0, 
+       LDA #&0B		;; POS=0, do VDU 11 to adjust print position
        JSR LA03C
-.L9420 JSR LA03A
+.L9420 JSR LA03A	;; Print final newline
 .L9423 JMP L89D8
 ;;
 .L9426 EQUB <L942A, <L942E, <L9432, <L9436
@@ -3453,54 +3558,65 @@ ENDIF
 ;;
 ;; FSC 9 - *EX
 ;; =============
-.L943A JSR L9478
-.L943D JSR L9331
-.L9440 LDY #&00
-       LDA (&B6),Y	;; Check first byte of directory entry
-       BEQ L9423	;; &00 - end of directory
-       JSR L9508	;; Print info for this entry
-       CLC		;; Step to next entry
-       LDA &B6		;; &B6/7=*B6/7+26
-       ADC #&1A
-       STA &B6
-       BCC L9440
-       INC &B7
-       BRA L9440
-;;
-.L9456 LDY #&00		;; Get first character of filename
-       LDA (&B4),Y
+.L943A	JSR L9478
+.L943D	JSR L9331
+.L9440
+IF USE65C12
+	LDA (&B6)	; Check first byte of directory entry
+ELSE
+	LDY #&00
+	LDA (&B6),Y	; Check first byte of directory entry
+ENDIF
+	BEQ L9423	; &00 - end of directory
+.L9446	JSR L9508	; Print info for this entry
+IF OPTIMISE<1
+	CLC		; Step to next entry
+	LDA &B6		; &B6/7=*B6/7+26
+	ADC #&1A
+	STA &B6
+	BCC L9440
+	INC &B7
+	BRA L9440
+ELSE
+	JSR NextEntry	; Step to next entry
+	BNE L9446	; Not end of directory, loop back to print entry
+	BEQ L9423	; End of directory, finish
+ENDIF
+
+.L9456 LDY #&00		; Point to first character, prepare Y=0 for later
+       LDA (&B4),Y	; Get first character of filename
        AND #&7F
-       CMP #&5E		;; '^' - parent
+       CMP #&5E		; '^' - parent
        BNE L946A
-       LDA #&C0		;; Point &B6/7 to &C8C0
+       LDA #&C0		; Point &B6/7 to &C8C0
        STA &B6
        LDA #&C8
        STA &B7
        BNE L9476
-.L946A CMP #&40		;; '@' - current directory
-       BNE L9477
-       LDA #&FE		;; Point &B6/7 to &C2FE
+.L946A CMP #&40		; '@' - current directory
+       BNE L9477	; Exit with NE, not '^' or '@'
+       LDA #&FE		; Point &B6/7 to &C2FE
        STA &B6
        LDA #&C2
        STA &B7
-.L9476 TYA
-.L9477 RTS
+.L9476 TYA		; Exit with A=&00, EQ for '^' or '@'
+.L9477 RTS		; Exit with Y=0, EQ if '^' or '@' found
 ;;
-.L9478 LDY #&00
-       LDA (&B4),Y	;; Get first character of filename
+.L9478 LDY #&00		; Caller may need this
+       LDA (&B4),Y	; Get first character of filename
        CMP #&21
        BCS L9486
-       LDX &C317        ;; Get current drive
-       INX              ;; If &FF, no directory loaded
+       LDX &C317        ; Get current drive
+       INX              ; If &FF, no directory loaded
        BNE L9477
 .L9486 JSR L8875
        BNE L9499
 .L948B LDY #&03
-       LDA (&B6),Y	;; Check 'D' bit
-       BMI L949E	;; Jump if directory
+       LDA (&B6),Y	; Check 'D' bit
+       BMI L949E	; Jump if directory
        JSR L8964
        BEQ L948B
-.L9496 JMP L8BE2        ;; Jump to 'Not found' error
+.L9496 JMP L8BE2        ; Jump to 'Not found' error
 ;;
 .L9499 JSR L9456
        BNE L9496
@@ -3689,19 +3805,28 @@ ENDIF
        BPL L95BE
        JSR L8F5D
        LDY #&03		;; Point to 'D' bit
-.L95D6 LDA (&B6),Y	;; Set attribute bit
-       ORA #&80
-       STA (&B6),Y
-       DEY
-       CPY #&01
-       BNE L95D6
-       DEY
-       LDA (&B6),Y	;; Set attribute bit
-       ORA #&80
-       STA (&B6),Y
-       LDA #&00
-       TAX
-       TAY
+.L95D6
+IF OPTIMISE<1
+	LDA (&B6),Y	; Set attribute bit
+	ORA #&80
+	STA (&B6),Y
+ELSE
+	JSR SetAttr	; Set attribute bit
+ENDIF
+	DEY
+	CPY #&01
+	BNE L95D6
+	DEY
+IF OPTIMISE<1
+	LDA (&B6),Y	; Set attribute bit
+	ORA #&80
+	STA (&B6),Y
+ELSE
+	JSR SetAttr	; Set attribute bit
+ENDIF
+	LDA #&00
+	TAX
+	TAY
 .L95EC STA &CA00,X
        STA &C900,X
        STA &CB00,X
@@ -3908,10 +4033,15 @@ ENDIF
        STA &C2A3
        STA &C2A4
        JSR L93CC
-.L97C7 LDY #&00
-       LDA (&B6),Y	;; Get first byte of directory entry
-       BNE L97DC	;; Not &00, not end of directory
-       LDA &C2A2
+.L97C7
+IF USE65C12
+	LDA (&B6)	; Get first byte of directory entry
+ELSE
+	LDY #&00
+	LDA (&B6),Y	; Get first byte of directory entry
+ENDIF
+	BNE L97DC	; Not &00, not end of directory
+.L97CD LDA &C2A2
        AND &C2A3
        AND &C2A4
        INC A
@@ -3947,13 +4077,20 @@ ENDIF
        STA &B4
        LDA &B7
        STA &B5
-.L9811 LDA &B6		;; Step to next entry
-       CLC		;; &B6/7=&B6/7+26
-       ADC #&1A
-       STA &B6
-       BCC L97C7
-       INC &B7
-       BCS L97C7
+.L9811
+IF OPTIMISE<1
+	LDA &B6		;; Step to next entry
+	CLC		;; &B6/7=&B6/7+26
+	ADC #&1A
+	STA &B6
+	BCC L97C7
+	INC &B7
+	BCS L97C7
+ELSE
+	JSR NextEntry	; Step to next entry
+	BNE L97DC	; Not end of directory
+	BEQ L97CD	; End of directory
+ENDIF
 .L981E LDA &B4
        STA &B6
        LDA &B5
@@ -4051,10 +4188,15 @@ ENDIF
        BPL L98D3
        JSR L97AE
        JSR L93CC
-.L98E2 LDY #&00
-       LDA (&B6),Y	;; Check first byte of directory entry
-       BEQ L9913	;; &00 - end of directory
-       LDY #&03
+.L98E2
+IF USE65C12
+	LDA (&B6)	; Check first byte of directory entry
+ELSE
+	LDY #&00
+	LDA (&B6),Y	; Check first byte of directory entry
+ENDIF
+	BEQ L9913	; &00 - end of directory
+.L98E8 LDY #&03
        LDA (&B6),Y	;; Check 'D' bit
        BPL L9930	;; Not a directory
        LDA &C0
@@ -4089,13 +4231,20 @@ ENDIF
        DEC &C0
        LDA (&C0),Y
        STA &B6
-.L9930 CLC		;; Step to next entry
-       LDA &B6		;; &B6/7=*B6/7+26
-       ADC #&1A
-       STA &B6
-       BCC L98E2
-       INC &B7
-       BRA L98E2
+.L9930
+IF OPTIMISE<1
+	CLC		; Step to next entry
+	LDA &B6		; &B6/7=*B6/7+26
+	ADC #&1A
+	STA &B6
+	BCC L98E2
+	INC &B7
+	BRA L98E2
+ELSE
+	JSR NextEntry
+	BNE L98E8	; Not end of directory
+	BEQ L9913	; End of directory
+ENDIF
 ;;
 .L993D JMP L89D8
 ;;
@@ -4154,11 +4303,15 @@ ENDIF
        BNE L99AA        ;; Jump past if not setting 'E'
        JSR L994A        ;; Clear all other bits
        LDY #&04		;; Point to 'E' bit
-       LDA (&B6),Y	;; Set access bit
-       ORA #&80
-       STA (&B6),Y	;; Set 'E' bit
-       STA &C22B        ;; Set 'E/D has been used' flag
-       BMI L99BD
+IF OPTIMISE<1
+	LDA (&B6),Y	; Set 'E' attribute bit
+	ORA #&80
+	STA (&B6),Y
+ELSE
+	JSR SetAttr	; Set 'E' attribute bit
+ENDIF
+	STA &C22B	; Set 'E/D has been used' flag
+	BMI L99BD
 ;;
 .L99AA LDX #&02         ;; Check if access character
 .L99AC CMP L931D,X
@@ -4180,11 +4333,24 @@ ENDIF
 .L99CE PHY
        TXA
        TAY
+IF OPTIMISE<1
+       LDA (&B6),Y	; Set access bit
+       ORA #&80
+       STA (&B6),Y
+ELSE
+       JSR SetAttr	; Set access bit
+ENDIF      
+       PLY
+       BRA L99BD
+
+IF OPTIMISE>=1
+.SetAttr
        LDA (&B6),Y	;; Set access bit
        ORA #&80
        STA (&B6),Y
-       PLY
-       BRA L99BD
+       RTS
+ENDIF
+
 ;;
 .L99DA JSR LA03A
        JSR L836B
@@ -4913,9 +5079,14 @@ ENDIF
 ;;
 ;; Store result value and claim call
 ;; ---------------------------------
-.L9DB0 LDY #&00         ;; Point to result byte
-       STA (&BA),Y      ;; Store result in control block
-.L9DB4 LDX &F4          ;; Put ROM number in X
+.L9DB0
+IF USE65C12
+	STA (&BA)	; Store result in control block
+ELSE
+	LDY #&00	; Point to result byte
+	STA (&BA),Y	; Store result in control block
+ENDIF
+.L9DB4 LDX &F4          ;; Restore ROM number in X
        PLY              ;; Restore Y
        LDA #&00         ;; A=0 to claim OSWORD
        RTS
@@ -5360,7 +5531,7 @@ ENDIF
        BEQ LA13F
        DEY
 .LA13F STY &C26F
-       LDY #&00
+       LDY #&00		;; Caller may need this
        LDA (&B4),Y	;; Check first character of filename
        CMP #&20
        BCC LA150
@@ -5539,7 +5710,7 @@ ENDIF
        JMP L8F91
 ;;
 .LA2B6 JSR LA50D
-       LDY #&00
+       LDY #&00		;; Y=0 needed for later
        LDA (&B4),Y	;; Check first character of filename
        CMP #&21
        BCS LA2EB
@@ -5652,7 +5823,7 @@ ENDIF
        LDA &B4
        PHA
        JSR LA4F5
-       LDY #&00
+       LDY #&00		;; Caller may need this
        LDA (&B4),Y	;; Check first character of filename
        CMP #&20
        BCS LA3CB
@@ -5864,7 +6035,7 @@ ENDIF
 .LA533 RTS
 ;;
 .LA534 
-       LDY #&00
+       LDY #&00		;; Caller may need this
        LDA (&B4),Y	;; Check first character of filename
        AND #&7F
        CMP #&3A
@@ -5892,7 +6063,7 @@ ENDIF
        STX &B5
        PHA
        PHX
-       LDY #&00
+       LDY #&00		;; Caller may need this
        LDA (&B4),Y
        AND #&7D
        CMP #&24
@@ -5987,15 +6158,19 @@ ENDIF
 ;;
 .LA622 JMP L95AB
 ;;
-.LA625 LDA &C237
-       BNE LA622
-       LDY #&09
-       LDA (&B6),Y	;; Set access bit 9
-       ORA #&80		;; What uses bit 9?
-       STA (&B6),Y
-       JSR L8F91
-       LDY #&0A
-       LDX #&07
+.LA625	LDA &C237
+	BNE LA622
+	LDY #&09	; What uses access bit 9?
+IF OPTIMISE<1
+	LDA (&B6),Y	; Set attribute bit
+	ORA #&80
+	STA (&B6),Y
+ELSE
+	JSR SetAttr	; Set attribute bit
+ENDIF
+	JSR L8F91
+	LDY #&0A
+	LDX #&07
 .LA639 LDA (&B6),Y
        STA &C238,Y
        INY
@@ -7166,11 +7341,16 @@ ENDIF
        LDA #&C4
        STA &B9
        LDX &CF
-.LAE38 LDY #&00
-       LDA (&B8),Y
-       BNE LAE44
-       STA &C3AC,X
-       JMP LA76E
+.LAE38
+IF USE65C12
+	LDA (&B8)
+ELSE
+	LDY #&00
+	LDA (&B8),Y
+ENDIF
+	BNE LAE44	; Not &00, exit
+	STA &C3AC,X
+	JMP LA76E	; Jump to 'Bad sum' error
 ;;
 .LAE44 LDY #&19
        LDA (&B8),Y
@@ -7192,6 +7372,7 @@ ENDIF
        BCC LAE38
        INC &B9
        BCS LAE38
+
 .LAE68 LDA #&00
        STA &C2B5
 .LAE6D LDA &C22F
@@ -7663,8 +7844,12 @@ ENDIF
 ;;
 .LB2AA DEX
        BPL LB277
+IF USE65C12
+       LDA (&B6)	;; Check 'R' bit
+ELSE
        LDY #&00
        LDA (&B6),Y	;; Check 'R' bit
+ENDIF
        BMI LB2B6	;; 'R' set, ...
        JMP L8BFB	;; 'R' not set, jump to error
 ;;
@@ -8051,8 +8236,12 @@ ENDIF
 ;;
 .LB5F0 TAY
        BEQ LB5EF
+IF USE65C12
+       LDA (&C6)
+ELSE
        LDY #&00
        LDA (&C6),Y
+ENDIF
        TAY
        JSR LAD0D
        PHP
@@ -8360,7 +8549,7 @@ ENDIF
 ;;
 .LB8A5 BIT &CD
        BVC LB8AD
-       STA &FEE5
+       STA TUBEIO
        RTS
 ;;
 .LB8AD STY &BC
@@ -8487,10 +8676,15 @@ ENDIF
        BCC LB98F
 .LB99A STY &B5
        STA &B4
-.LB99E LDY #&00
-       LDA (&B4),Y	;; Check first character of filename
+.LB99E
+IF USE65C12
+	LDA (&B4)	; Check first character of directory entry
+ELSE
+	LDY #&00
+	LDA (&B4),Y	; Check first character of directory entry
+ENDIF
        STA &C2B5
-       BEQ LB9BB
+       BEQ LB9BB	; &00 - end of directory
        JSR LB8BC
        LDA &B4
        CLC
@@ -8559,9 +8753,9 @@ ENDIF
 .LBA2F JSR L821B
        BCC LBA3B
        LDA (&BE),Y
-       STA &FEE5
+       STA TUBEIO
        BCS LBA40
-.LBA3B LDA &FEE5
+.LBA3B LDA TUBEIO
        STA (&BE),Y
 .LBA40 INY
        PHP
@@ -8971,11 +9165,11 @@ ENDIF
        INC &0D0B
        BNE LBD0E
        INC &0D0C
-.LBD0E LDA &FEE5
+.LBD0E LDA TUBEIO
        STA &FE2B        ;; FDC Data register
        BCS LBD1C
 .LBD16 LDA &FE2B        ;; FDC Data register
-       STA &FEE5
+       STA TUBEIO
 .LBD1C BCS LBD24
 .LBD1E BIT &A1
        BMI LBD2F
@@ -9045,7 +9239,7 @@ ENDIF
        LDX #&07
 .LBD9D DEX
        BNE LBD9D
-       STA &FEE5
+       STA TUBEIO
        INY
        CPY &C21E
        BNE LBD99
@@ -9280,7 +9474,7 @@ ENDIF
        CMP #&0A         ;; Check for sector &0A00
        BCC LBF8F	;; <&A00 - sector within range
 
-IF OPTIMISE<1
+IF NOT(TRIM_REDUNDANT)
 			;; Bug, the rest of these checks shouldn't happen
 			;; Should just drop straight into 'Sector out of range'
        BNE LBF6F	;; >&AFF - sector out of range
@@ -9296,7 +9490,7 @@ ENDIF
 ;; -------------------------------------
 .LBF73 BNE LBFB7	;; Jump to return error in &A0
 
-IF OPTIMISE<1
+IF NOT(TRIM_REDUNDANT)
 ;; This code never entered, as the above BCC LBF75 never followed
 .LBF75 LDA &A1		;; Get flag
        AND #&10

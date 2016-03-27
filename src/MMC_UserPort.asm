@@ -1,6 +1,8 @@
 ;; ADFS MMC Card Driver
 ;; (C) 2015 David Banks
 ;; Based on code from MMFS ROM by Martin Mather
+;;
+;; 27-Mar-2016 JGH: MMC_EndWrite returns ADFS result code
 
 \ User VIA registers
 iorb%=_VIA_BASE
@@ -48,7 +50,27 @@ ENDIF
     LDA sr%
     RTS
 }
-        
+
+
+;; *** Send command to MMC ***
+;; On exit A=result, Z=result=0
+.MMC_DoCommand
+    LDX #0
+{
+;    LDY #7
+.dcmdu1
+    LDA cmdseq%,X
+    JSR UP_WriteByte
+    INX
+;    DEY
+    CPX #7
+    BNE dcmdu1
+    JSR waitresp_up  ; Returns A,X=values for UP_ReadBits7
+;    JMP UP_ReadBits7
+    ; Fall though into UP_ReadBits7
+}
+
+
 ;; This is always entered with X and A with the correct values
 .UP_ReadBits7
     STX iorb%           ;;1
@@ -113,23 +135,6 @@ ENDIF
     RTS             ; A=SR, X=1, Y=0
 }
 
-
-;; *** Send command to MMC ***
-;; On exit A=result, Z=result=0
-.MMC_DoCommand
-    LDX #0
-
-{
-    LDY #7
-.dcmdu1
-    LDA cmdseq%,X
-    JSR UP_WriteByte
-    INX
-    DEY
-    BNE dcmdu1
-    JSR waitresp_up
-    JMP UP_ReadBits7
-}
 
 ;; wait for response bit
 ;; ie for clear bit (User Port only)
@@ -438,18 +443,29 @@ ENDIF
     JSR waitresp_up
     JSR UP_ReadBits4
     TAY
+    ; Data response
+    ; %xxx0sss1
+    ;      010 data accepted
+    ;      101 data rejected due to CRC error
+    ;      110 data rejected due to write error
     AND #&1F
+    CMP #11
+    BEQ error_crc
     CMP #5
-    BNE error
+    BNE error_write
 
     LDX #(1 + msbits)
 .ewu2
     JSR UP_ReadByteX
     CMP #&FF
     BNE ewu2
+    RTS        ; Returns with EQ, A=corrupted
+.error_crc
+    LDA #&11
     RTS
-.error
-    JMP errWrite
+.error_write
+    LDA #&03
+    RTS
 }
 
         

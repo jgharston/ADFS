@@ -1,12 +1,21 @@
 Rationalised source file naming structure
 -----------------------------------------
-!MkIDE.bat       - batch file to build ADFS with IDE drivers
-!MkMMC.bat       - batch file to build ADFS with user port MMC drivers
-!MkSCSI.bat      - batch file to build ADFS with SCSI drivers
+!MkIDEm.bat      - batch file to build Master ADFS with IDE drivers
+!MkMMCm.bat      - batch file to build Master ADFS with user port MMC drivers
+!MkSCSIm.bat     - batch file to build Master ADFS with SCSI drivers
 
-adfsIDE.asm      - launch file to assemble ADFS with IDE drivers
-adfsMMC.asm      - launch file to assemble ADFS with user port MMC drivers
-adfsSCSI.asm     - launch file to assemble ADFS with SCSI drivers
+masIDE.asm       - launch file to assemble Master ADFS with IDE drivers
+masMMC.asm       - launch file to assemble Master ADFS with user port MMC drivers
+masSCSI.asm      - launch file to assemble Master ADFS with SCSI drivers
+
+bbcIDE.asm       - launch file to assemble BBC ADFS with IDE drivers
+bbcMMC.asm       - launch file to assemble BBC ADFS with user port MMC drivers
+bbcSCSI.asm      - launch file to assemble BBC ADFS with SCSI drivers
+
+elkIDE.asm       - launch file to assemble Electron ADFS with IDE drivers
+elkMMC.asm       - launch file to assemble Electron ADFS with user port MMC drivers
+elkSCSI.asm      - launch file to assemble Electron ADFS with SCSI drivers
+The above would be easier if BeebAsm had a '-Dlabel' option
 
 adfs.asm         - Core ADFS source
 MMC_Driver.asm   - ADFS disk command -> MMC command
@@ -32,14 +41,23 @@ Added platform-specific define block to generate Electron, BBC, Master ADFS.
 Version number/string generated from code capability.
 Rationalised IF/ENDIF blocks.
 
+MMC_Driver.asm, 27-Mar-2016
+---------------------------
+Code transfer loop checks for failure result from MMC calls.
+
 MMC.asm, 27-Mar-2016
 --------------------
-All routines return result to caller, don't bomb out with errors. Need to
-check references to get actual correct result codes.
-Optimised MMC_BEGIN and MMC_INIT
+All routines return ADFS result to caller, don't bomb out with errors.
+Optimised MMC_BEGIN, MMC_INIT, Command/RandomAddress, incAddress.
+Moved some code to remove from JMPs.
+
+MMC_UserPort.asm, 27-Mar-2016
+-----------------------------
+MMC_WriteEnd returns ADFS write error codes.
 
 adfs.asm, 27-Mar-2016
 ---------------------
 Chopped out redundant floppy sector range test, redundant *DELETE entry
 if building for Master. Moved some MMC calls to more appropriate places.
+Optimised some inline code into subroutines, used 65C12 code where possible.
 
