@@ -8,21 +8,38 @@ adfsIDE.asm      - launch file to assemble ADFS with IDE drivers
 adfsMMC.asm      - launch file to assemble ADFS with user port MMC drivers
 adfsSCSI.asm     - launch file to assemble ADFS with SCSI drivers
 
-adfs150.asm      - Core ADFS source
+adfs.asm         - Core ADFS source
 MMC_Driver.asm   - ADFS disk command -> MMC command
 MMC.asm          - high level MMC card driver
 MMC_UserPort.asm - low level user port->MMC access
 
 Changes.txt      - this file
 
-adfs150.asm, 21-Feb-2016
-------------------------
-Added LARGE_DISK option, for future use for usinf full 24-bit sector address.
-Added KEEP_REDUNDANT to remove redundant code where possible.
-Optimised *INFO code when KEEP_REDUNDANT=FALSE.
-Removes Break+-> option when KEEP_REDUNDANT=FALSE.
+adfs.asm, 21-Feb-2016
+---------------------
+Added LARGE_DISK option, for future use for using full 24-bit sector address.
+Added TRIM_REDUNDANT to remove redundant code where possible.
+Optimised *INFO code when TRIM_REDUNDANT=TRUE.
+Removes Break+-> option when TRIM_REDUNDANT=TRUE.
 
 MMC.asm, 20-Feb-2016
 --------------------
 Corrected error numbers. Shouldn't be errors, should be return results.
+
+adfs.asm, 26-Mar-2016
+---------------------
+Added platform-specific define block to generate Electron, BBC, Master ADFS.
+Version number/string generated from code capability.
+Rationalised IF/ENDIF blocks.
+
+MMC.asm, 27-Mar-2016
+--------------------
+All routines return result to caller, don't bomb out with errors. Need to
+check references to get actual correct result codes.
+Optimised MMC_BEGIN and MMC_INIT
+
+adfs.asm, 27-Mar-2016
+---------------------
+Chopped out redundant floppy sector range test, redundant *DELETE entry
+if building for Master. Moved some MMC calls to more appropriate places.
 

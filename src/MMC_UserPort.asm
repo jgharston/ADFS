@@ -11,7 +11,7 @@ ifr% =_VIA_BASE + &0D
 ier% =_VIA_BASE + &0E
 
 IF _TURBOMMC
-   temp    = &cf
+   temp    = &CF
    ddrmask = &1F ;; 0001 1111
    msbits  = &08 ;; 0000 1000
    msmask  = &E9 ;; 1110 1001
@@ -189,7 +189,7 @@ ENDIF
 
 .MMC_ReadToTube
     JSR WaitForShiftDoneNotLast
-    STA TUBE_R3_DATA
+    STA TUBEIO
     JSR WaitForShiftDone   ;; Dummy read
     INY
     DEX
@@ -493,7 +493,7 @@ ELSE
 ENDIF
 
 .MMC_WriteFromTube
-    LDA TUBE_R3_DATA
+    LDA TUBEIO
 IF _TURBOMMC
     STA sr%
     LDA #4

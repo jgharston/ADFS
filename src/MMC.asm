@@ -1,9 +1,23 @@
-;; ADFS MMC Card Driver
-;; (C) 2015 David Banks
-;; Based on code from MMFS ROM by Martin Mather
-;; 20-Feb-2016 JGH: Corrected error numbers
-;; None of these should be errors, they should be return results
-;;  otherwise, eg OSWORD &72 bombs out instead of returning a result.
+; ADFS MMC Card Driver
+; (C) 2015 David Banks
+; Based on code from MMFS ROM by Martin Mather
+;
+; 20-Feb-2016 JGH:
+; Corrected error numbers. None of these should be errors, they should be
+; return results otherwise, eg OSWORD &72 bombs out instead of returning a
+; result.
+;
+; 27-Mar-2016 JGH:
+; MMC_BEGIN redefined interface to destroy all registers, returns result,
+; falls through to MMC_INIT to initialise and return result.
+; setCommandAddress returns error result on failure.
+; StartRead/Write return error result on failure - need to translate result.
+
+; return values, need to work out which appropriate
+; &00 - ok
+; &04 - not ready
+; &08 - communication failure
+; &3A - not ready, media not present
 
 
 trys%=&32
@@ -15,68 +29,35 @@ set_blklen       =&50
 read_single_block=&51
 write_block      =&58
 
-;; **** Begin Read Transaction ****
-.MMC_StartRead
-     JSR MMC_DoCommand
-     BNE errRead
-     JMP MMC_WaitForData
 
-;; **** Begin Write Transaction ****
-.MMC_StartWrite
-     JSR MMC_DoCommand
-     BNE errWrite
-     JMP MMC_SendingData
-
-.errRead
-;;; Should be a return with A=???
-     ORA #&40  ;; Setting bit 6 in the fault code will ensure it's printed
-     TAX
-     JSR L8374 ;; This version prints the fault code in X
-     EQUB &C7
-     EQUS "MMC Read fault"
-     EQUB &00
-
-.errWrite
-;;; Should be a return with A=???
-     ORA #&40  ;; Setting bit 6 in the fault code will ensure it's printed
-     TAX
-     JSR L8374 ;; This version prints the fault code in X
-     EQUB &C7
-     EQUS "MMC Write fault"
-     EQUB &00
+; MMC_BEGIN - Initialise MMC card
+; *******************************
+; Returns EQ, A=0 ok
+;         NE, A<>0 - failed
+; Corrupts X,Y
+.MMC_BEGIN
+{
+	JSR MMC_DEVICE_RESET	; Reset device
+	BIT mmcstate%		; Check if MMC initialised
+	BVC MMC_INIT		; Card needs initialising
+	LDA #&00		; Return A='ok'
+	RTS
+}
 
 
-;; **** Set-up MMC command sequence ****
-;; C=0 for read, C=1 for write 
-.MMC_SetupRW
-     LDA #write_block
-     BCS MMC_SetCommand
-     LDA #read_single_block
-        
-;; **** Reset MMC Command Sequence ****
-;; A=cmd, token=&FF
-
-.MMC_SetCommand
-     STA cmdseq%+1
-     LDA #0
-     STA cmdseq%+2
-     STA cmdseq%+3
-     STA cmdseq%+4
-     STA cmdseq%+5
-     LDA #&FF
-     STA cmdseq%
-     STA cmdseq%+6                   ;; token
-     STA cmdseq%+7
-     RTS
-
-;; ***** Initialise MMC card *****
-;; Carry=0 if ok
-;; Carry=1 if card doesn't repsond at all!
-;; corrupts A,X,Y
+; MMC_INIT - Initialise MMC card
+; ******************************
+; Returns EQ, A=0 if ok
+;         NE, A=result if card can't be initialised
+; Corrupts X,Y
 .MMC_INIT
 {
+IF USE65C12
+     STZ mmcstate%
+ELSE
      LDA #0
      STA mmcstate%
+ENDIF
 
      LDA #trys%
      STA attempts%
@@ -94,8 +75,8 @@ write_block      =&58
      JSR MMC_DoCommand
      AND #&81                        ; ignore errors
      CMP #1
-     BEQ il0
-     JMP ifail
+     SEC
+     BNE il10
 .il0
      LDA #&01
      STA cardsort%
@@ -119,8 +100,8 @@ write_block      =&58
      JSR MMC_SetCommand
      JSR MMC_DoCommand
      CMP #2
-     BCC il11
-     JMP ifail
+.il10
+     BCS ifail
 .il11
      BIT EscapeFlag                  ; may hang
      BMI ifail
@@ -128,7 +109,7 @@ write_block      =&58
      BNE il1
      LDA #&02
      STA cardsort%
-     JMP iok
+     BNE iok
 
 .isdhc
      JSR UP_ReadByteX
@@ -174,7 +155,7 @@ write_block      =&58
      ;; All OK!
      LDA #&40
      STA mmcstate%
-     CLC
+     LDA #&00     ;; A=0, EQ=Ok
      RTS
 
 .ifail
@@ -184,100 +165,107 @@ write_block      =&58
      JMP iloop
 
 .ifaildone
-     ;; Give up!
-     SEC
-     RTS
+     LDA #&04	;; Card not responding
+     RTS        ;; NE=Failed
 
-     ;; Failed to set block length
 .blkerr
-     JSR L8372
-;;; Should be a return with A=&04
-     EQUB &CD     ;; &CD='Drive not ready'
-     EQUS "MMC Set block len error"
-     EQUB &00
+     LDA #&04	;; Can't set up block size
+     RTS        ;; NE=Failed
 }
 
-.MMC_BEGIN
-{
-     PHA
-     ;; Reset device
-     JSR MMC_DEVICE_RESET
 
-     ;; Check if MMC initialised
-     ;; If not intialise the card
-     BIT mmcstate%
-     BVS beg2
-
-     PHX
-     PHY
-     JSR MMC_INIT
-     PLY
-     PLX
-     BCS carderr
-.beg2
-     PLA
+;; **** Set up MMC command sequence ****
+;; Cy=0 for read, Cy=1 for write
+;; X,Y preserved, A corrupted
+.MMC_SetupRW
+     LDA #write_block
+     BCS MMC_SetCommand
+     LDA #read_single_block
+        
+;; **** Reset MMC Command Sequence ****
+;; A=cmd, token=&FF
+.MMC_SetCommand
+     STA cmdseq%+1
+IF USE65C12
+     STZ cmdseq%+2
+     STZ cmdseq%+3
+     STZ cmdseq%+4
+     STZ cmdseq%+5
+ELSE
+     LDA #0
+     STA cmdseq%+2
+     STA cmdseq%+3
+     STA cmdseq%+4
+     STA cmdseq%+5
+ENDIF
+     LDA #&FF
+     STA cmdseq%+0
+     STA cmdseq%+6                   ;; token
+     STA cmdseq%+7
      RTS
 
-;; Failed to initialise card!
-.carderr
-     JSR L8372
-;;; Should be a return with A=&04
-     EQUB &CD     ;; &CD='Drive not ready'
-     EQUS "Card?"
-     EQUB &00
-     
-}
 
+;; Set Random/Command Address
+;; **************************
 ;; Translate the sector number into a SPI Command Address
 ;; Sector number is in 256 bytes sectors which are stretched to become 512 byte sectors
 ;; For SDHC cards this is in blocks (which are also sectors)
 ;; For SD cards this needs converting to bytes by multiplying by 512
-
-.setRandomAddress
-{
-    PHX
-    LDA #0         ;; MSB of sector number
-    PHA
-    LDA &C203,X
-    PHA
-    LDA &C202,X
-    PHA
-    LDA &C201,X    ;; LSB of sector number
-    PHA
-    BRA setAddressFromStack
-}
 
 ;; (&B0) + 8 is the LSB
 ;; (&B0) + 6 is the MSB
 ;; cmdseq%+5 is the LSB
 ;; cmdseq%+2 is the MSB
 
+;; Set MMC Command Address from random access index
+;; ************************************************
+;; On entry, X=>offset from &C200 to random access info
+;; On exit,  EQ A=0  - ok
+;;           NE A<>0 - failed
+;; Corrupts X,Y
+.setRandomAddress
+{
+    LDA #0         ;; b24-b31 of sector number
+    PHA
+    LDY #3         ;; 3 bytes for remainder of sector number
+.loop
+    LDA &C203,X    ;; byte 2/1/0 of sector number
+    PHA            ;; stack it
+    DEX
+    DEY
+    BNE loop
+    BRA setAddressFromStack
+}
+
+;; Set MMC Command Address from (&B0),control block
+;; ************************************************
+;; On exit,  EQ A=0  - ok
+;;           NE A<>0 - failed
+;; Corrupts X,Y
 .setCommandAddress
 {
-    PHX
-    LDA #0          ;; MSB of sector number
+    LDA #0         ;; b24-b31 of sector number
     PHA
-    LDY #6          ;; Point to sector MSB in the control block
-    LDX #3          ;; sector number is 3 bytes
+    LDY #6         ;; Point to sector b16-b23 in the control block
 .loop
     LDA (&B0), Y    ;; Stack the MSB first, LSB last
     PHA
     INY
-    DEX
+    CPY #9
     BNE loop
 }    
 
-        
+; Stack now has -> b0-b7, b8-b15, b16-b23+drive, &00
 .setAddressFromStack
 {
 ;; Process the drive number
      TSX
-     LDA &103, X    ;; Bits 7-5 are the drive number
+     LDA &103,X     ;; Bits 7-5 are the drive number
      PHA
      ORA &C317      ;; Add in current drive
      STA &C333      ;; Store for any error
 
-     CLC            ;; Shift into bits 0-2
+     CLC            ;; Rotate into bits 0-2
      ROL A
      ROL A
      ROL A
@@ -292,7 +280,7 @@ write_block      =&58
 
      PLA            ;; Mask out the drive number, leaving just the MS sector
      AND #&1F
-     STA &103, X
+     STA &103, X    ;; Store back into sector on stack
 
      CLC
 .addDriveOffset
@@ -303,64 +291,53 @@ write_block      =&58
      INY
      TYA
      AND #&03
-     BNE addDriveOffset 
+     BNE addDriveOffset
+     ;; Usefully, X now points to end of stacked data
 
-     LDX #3          ;; sector number is 4 bytes
-;;
-     LDA cardsort%   ;; Skip multiply for SDHC cards (cardsort = 01)
-     CMP #2
-     BNE setCommandAddressSDHC
-;;
-;; Convert to bytes by multiplying by 512
-;;
+     LDA cardsort%   ;; Need to skip multiply for SDHC cards (cardsort = 01)
+     TAY
+     DEY             ;; Y=&00 no multiply needed, Y<>&00 multiply needed
+     LDX #4          ;; sector number is 4 bytes
      CLC
-.loop                ;; for SD the command address is bytes
+.loop
      PLA
+     INY
+     DEY
+     BEQ nomult      ;; Multiply not needed
      ROL A
+.nomult
      STA cmdseq%+1, X
      DEX
      BNE loop
-     STZ cmdseq%+5   ;; LSB is always 0
      BCS overflow    ;; if carry is set, overflow has occurred
-     PLA             ;; if the MS byte of the original sector
-     BNE overflow    ;; was non zero, overflow has occurred
-     PLX
+     LDA #&00        ;; A=0, EQ, Ok
+     STA cmdseq%+5   ;; LSB is always 0
      RTS
 
 .invalidDrive
-;;; Should be a return with A=???
-     JSR L8372        ;; Generate error
-     EQUB &D2         ;; ERR=210
-     EQUS "Drive not present"
-     EQUB &00
+      TXS           ; Step past stacked data
+      LDA #&25      ; A='Invalid drive number'
+      RTS
 
 .overflow
-;;; Should be a return with A=&21
-     JSR L8372        ;; Generate error
-     EQUB &C7         ;; ERR=199
-     EQUS "Sector not found"
-     EQUB &00
+      LDA #&21      ; A='Sector out of range'
+      RTS
 }
 
-.setCommandAddressSDHC
-{
-.loop                ;; for SDHC the command address is sectors
-     PLA             ;; copy directly to cmdseq%+2 ...cmdseq%+5
-     STA cmdseq%+2, X
-     DEX
-     BPL loop
-     PLX
-     RTS
-}
 
+;; Update sector address
+;; *********************
 .incCommandAddress
 {
      LDA cardsort%
      CMP #2
-     BNE incCommandAddressSDHC
-;; Add 512 to address (Sector always even)
-     INC cmdseq%+4
-.incMS
+     BEQ incAddr    ; &02   - add &200
+     LDA #1         ; <>&02 - add &100
+.incAddr
+     CLC
+     ADC cmdseq%+5
+     STA cmdseq%+5
+     BCC incDone
      INC cmdseq%+4
      BNE incDone
      INC cmdseq%+3
@@ -368,25 +345,45 @@ write_block      =&58
      INC cmdseq%+2
 .incDone
      RTS
-
-;; Add one to address
-.incCommandAddressSDHC
-     INC cmdseq%+5
-     BEQ incMS
-     RTS
 }
+
+
+;; **** Begin Read Transaction ****
+.MMC_StartRead
+     JSR MMC_DoCommand
+     BNE errRead
+     JMP MMC_WaitForData
+
+;; **** Begin Write Transaction ****
+.MMC_StartWrite
+     JSR MMC_DoCommand
+     BNE errWrite
+     JMP MMC_SendingData
+
+.errRead
+.errWrite
+;; Need to convert MMC error response code into a SCSI error response code
+;; For the moment, just wop it up high
+     ORA #&80
+     RTS
+
 
 .initializeDriveTable
 {
 ;; Load 512b sector 0 (MBR) to &C000-&C1FF
 ;; Normally MBR resides here, but we do this before MBR is loaded
 ;; We can't use OSWORD &72 to do this, as we don't want alternative bytes skipped
+;; This is done during filing system selection, so generating errors would leave
+;; system in an inconsistant state.
+;
      JSR MMC_BEGIN      ;; Initialize the card, if not already initialized
+; may return an error
      CLC                ;; C=0 for Read
      JSR MMC_SetupRW
      JSR MMC_StartRead
+; may return an error
      LDA #<mbrsector%
-     STA datptr%
+     STA datptr% + 0
      LDA #>mbrsector%
      STA datptr% + 1
      JSR MMC_Read512
@@ -422,7 +419,7 @@ write_block      =&58
      STZ drivetable% - 1, X     ;; all zeros is treated as an invalid drive
      DEX
      BNE loop
-     STZ numdrives%             ;; clear the number of drives
+     STX numdrives%             ;; clear the number of drives
         
 .testPartition
      LDY #&04
@@ -450,20 +447,15 @@ write_block      =&58
      BNE testPartition
 
 .done
-     CPX #0                     ;; Did we find any ADFS partitions?
+     TXA                        ;; Did we find any ADFS partitions?
      BEQ noADFS                 ;; No, then fatal error
+     LDA #&00			;; A='Ok'
      RTS
 
 .noMBR
-     JSR L8372
-     EQUB &CD                   ;; ERR 205='Drive not ready'
-     EQUS "No MBR"
-     EQUB &00
-    
+     LDA #&3F			;; A='No Master Boot Record'
+     RTS
 .noADFS
-;;; Should be a return with A=???
-     JSR L8372
-     EQUB &CD                   ;; ERR 205='Drive not ready'
-     EQUS "No ADFS partitions"
-     EQUB &00
+     LDA #&3E			;; A='No ADFS partitions'
+     RTS
 }
