@@ -10,26 +10,20 @@
 ; build:
 ; ADFS Master SCSI v1.50r9
 ; ADFS Master IDE  v1.53r21
-; ADFS Master MMC  needs mnore optimisation to fit into 16K
-
-
-; Next: Is data lost check not needed with MMC
+; ADFS Master MMC  needs more optimisation to fit into 16K
 
 
 ; OPTIMISE flag sets how hard to optimise
-; 1 Subroutines for ReadCMOS, GetFilename, SetAttr, NextEntry, DiskSpeed
-; 2 Use 65C12 coding where possible
-;
-; Other optimisation options
-;  Convert disk result to error
-;  OSARGS pointer manipulation
-;  High level, really crunch stuff a la Zorn
+; 1 Use 65C12 coding where possible
+; 2 Subroutines for ReadCMOS, GetFilename, SetAttr, NextEntry, DiskSpeed
+; 3 Rewritten disk error generation
+; 4 Crunch OSARGS, BGET/BPUT update, CheckOpen
 
 
 ; Sanity check
 ; ------------
 IF (HD_SCSI AND HD_IDE) OR (HD_SCSI AND HD_MMC) OR (HD_IDE AND HD_MMC)
-	ERROR Cannot build for multiple device drivers
+	ERROR "Cannot build for multiple device drivers"
 ENDIF
 
 
@@ -87,7 +81,7 @@ VERSION=VERBASE + (PRESERVE_CONTEXT AND 1) + (HD_IDE AND 2) + (HD_MMC AND 4)
 ;                |11----reserved
 ;                +------reserved
 
-IF TARGETOS>2 AND OPTIMISE>=2
+IF TARGETOS>2 AND OPTIMISE>=1
   USE65C12=TRUE		; Squash (zp),0, JMP/BRA, etc. where possible
 ELSE
   USE65C12=FALSE
@@ -250,7 +244,7 @@ ENDIF
        RTS
 ;;
 ;;
-.L809F JMP L82C9
+.L809F JMP L82C9	;; Jump to 'Escape' error
 ;;
 ;;
 ;; Access a drive using SCSI protocol
@@ -275,6 +269,12 @@ ENDIF
 ;;   XY+15
 ;;
 ;; On exit: A=result. 0=OK, <>0=error, with ADFS error block filled in
+;; ADFS Error Information:
+;;   &C2D0 Sector b0-b7
+;;   &C2D1 Sector b8-b15
+;;   &C2D2 Sector b16-b19 and Drive
+;;   &C2D3 SCSI error number
+;;   &C2D4 Channel number if &C2D3.b7=1
 ;;
 .L80A2 JSR L8328        ;; Wait for ensuring to complete
        STX &B0
@@ -299,7 +299,7 @@ ENDIF
 ;;                         If Drive not ready, pause a bit
        LDY #&19         ;; Loop 25*256*256 times
 .L80C8 BIT &FF          ;; Escape pressed?
-       BMI L809F        ;; Abort with Escape error
+       BMI L809F        ;; Abort with Escape error (shouldn't this return Abort?)
        SEC
        SBC #&01
        BNE L80C8        ;; Loop 256 times with A
@@ -350,14 +350,6 @@ IF FLOPPY
        STA &C2D3        ;; Store
 .L8110 RTS
 ENDIF
-;;
-;; ADFS Error Information:
-;;   &C2D0 Sector b0-b7
-;;   &C2D1 Sector b8-b15
-;;   &C2D2 Sector b16-b19 and Drive
-;;   &C2D3 SCSI error number
-;;   &C2D4 Channel number if &C2D3.b7=1
-;;
 ;;
 ;; Hard drive hardware is present. Check what drive is being accessed.
 ;;
@@ -888,7 +880,7 @@ ENDIF
 ;       &7F Unknown result
 ; See the BeebWiki for full info
 ;
-; Should ignore FDD flag in bit 6 when checking
+IF OPTIMISE<3
 .L82BD CMP #&25         ;; Hard drive error &25 (Bad drive)?
        BEQ L82B4        ;; Jump to give 'Not found' error
        CMP #&65         ;; Floppy error &25 (Bad drive)?
@@ -896,10 +888,10 @@ ENDIF
        CMP #&6F         ;; Floppy error &2F (Abort)?
        BNE L82DC        ;; If no, report a disk error
 ;;
-.L82C9 JSR L849A
+.L82C9 JSR L849A	;; Invalidate FSM and DIR in memory
 .L82CC LDA #&7E
        JSR &FFF4        ;; Acknowledge Escape state
-       JSR L836B        ;; Generate an error
+       JSR L836B        ;; Reload FSM and DIR, generate an error
        EQUB &11         ;; ERR=17
        EQUS "Escape"    ;; REPORT="Escape"
        EQUB &00
@@ -922,18 +914,46 @@ ENDIF
        EQUS "Disc error"
        EQUB &00
 ;;
-.L830B JSR L834E        ;; Generate an error
+.L830B JSR L834E        ;; Do something, then generate an error
        EQUB &C9         ;; ERR=201
        EQUS "Disc protected"
        EQUB &00
-;;
+ELSE
+.L82BD	PHA		; Save disk error number for later
+	AND #&3F	; Drop HDD/FDD flag from bit 6
+	BEQ L830B	; &40->&00-> Disc write protected
+; If there is space, add things like MMC card not formatted, No ADFS partition, etc.
+	CMP #&25	; Bad drive
+	BEQ L82B4	; Jump to give 'Not found' error
+	CMP #&2F
+	BEQ L82C9	; Abort -> Escape
+			; All other results, give generic error message
+	JSR L89D8	; Load FSM and root directory
+	PLX		; Get disk error number back
+	JSR L8374	; Generate error with number in X
+	EQUB &C7	; ERR=199
+	EQUS "Disc error"
+	EQUB &00
+.L82C9	JSR L849A	; Invalidate FSM and DIR in memory
+.L82CC	LDA #&7E
+	JSR &FFF4	; Acknowledge Escape state
+	JSR L836B	; Reload FSM and DIR, generate an error
+	EQUB &11	; ERR=17
+	EQUS "Escape"
+	EQUB &00
+.L830B	JSR L834E	; Do something, then generate an error
+	EQUB &C9	; ERR=201
+	EQUS "Disc protected"
+	EQUB &00
+ENDIF
+;
 IF HD_IDE
        EQUB 0,0,0,0,0,0,0,0
        EQUB 0,0
 ENDIF
 IF HD_SCSI
 .L831E JSR L8324	;; Wait until not busy, then write command to command register
-       BNE L82BD        ;; If no Ok, generate disk error
+       BNE L82BD        ;; If not Ok, generate disk error
        RTS
 .L8324 JSR L833E	;; This code cannot be inlined or JMPed as
        RTS              ;;  L833E changes stack
@@ -997,6 +1017,18 @@ ENDIF
        PLA
        JMP L81AD        ;; Jump to get result and return
 
+; Generate an error
+; =================
+; Fairly complicated routine that checks various bits of context to create an
+; explanatory error message.
+; 'Error message'
+; +' XX at :D/SSSSSS' if passed non-zero in X
+; +' on channel NNN' if a channel is being used
+; Allows up to 'Error message XX at :D/SSSSSS on channel NNN'
+;
+
+; Do something, then reload FSM+DIR and generate an error
+; -------------------------------------------------------
 .L834E LDX &C22F
        INX
        BNE L836B
@@ -1010,113 +1042,133 @@ ENDIF
        BPL L835C
 .L8365 LDA &C317
        STA &C22F
-.L836B JSR L89D8
-       LDA #&10
-       TRB &CD
-.L8372 LDX #&00
-;;
-.L8374 PLA
+
+; Reload FSM+DIR and generate an error
+; ------------------------------------
+.L836B	JSR L89D8	; Reload FSM and DIR if needed
+IF NOT(TRIM_REDUNDANT)
+	LDA #&10	; Clear 'FSM inconsistant' flag
+	TRB &CD		; This gets done anyway in a bit
+ENDIF
+
+; Generate an error with no suffix
+; --------------------------------
+.L8372 LDX #&00		; X=&00 for no error suffix
+
+; Generate an error with suffix number if X<>0
+; --------------------------------------------
+.L8374 PLA		; Pop return address
        STA &B2
        PLA
        STA &B3
        LDA #&10
-       TRB &CD
+       TRB &CD		; Clear 'FSM inconsistant' flag
        LDY #&00
 .L8380 INY
-       LDA (&B2),Y
+       LDA (&B2),Y	; Copy error to error block at &100
        STA &0100,Y
        BNE L8380
        TXA
-       BEQ L83DA
+       BEQ L83DA	; No suffix needed
        LDA #&20
-       STA &0100,Y
+       STA &0100,Y	; Add a space
        TXA
-       CMP #&30
-       BCS L839B
-.L8395 JSR L8451
-       JMP L83A2
-
-.L839B CMP #&3A
-       BCS L8395
-       JSR L846D
+IF OPTIMISE<3
+; This initially looks like a bug, if X=&30-&39 inserts in decimal as though
+; it's a channel number, but then continues to append disk error information.
+; This is done for 'Data lost, channel NNN at :D/SSSSSS' which could even
+; become 'Data lost, channel NNN at :D/SSSSSS on channel NNN'. Better to
+; generate the 'Data lost' error as a channel error.
+	CMP #&30
+	BCS L839B	; &30+, jump to check if channel number
+.L8395	JSR L8451	; Insert disk error as hex number
+	JMP L83A2
+.L839B	CMP #&3A
+	BCS L8395	; &3A+, not a channel number, jump back
+	JSR L846D	; Insert number in decimal
+ELSE
+	JSR L8451	; Insert disk error as hex number
+ENDIF
 .L83A2 LDX #&04
 .L83A4 INY
-       LDA L8440,X
+       LDA L8440,X	; Insert ' at :'
        STA &0100,Y
        DEX
        BPL L83A4
-       LDA &C2D2
+       LDA &C2D2	; Get drive last used
        ASL A
        ROL A
        ROL A
        ROL A
-       JSR L8462
+       JSR L8462	; Convert to digit (ORA #&48 would do here)
        INY
-       STA &0100,Y
+       STA &0100,Y	; Insert into error block
        LDA #&2F
        INY
-       STA &0100,Y
-       LDA &C2D2
-       AND #&1F
+       STA &0100,Y	; Insert '/'
+       LDA &C2D2	; Get sector last used
+       AND #&1F		; Remove drive bits
        LDX #&02
        BNE L83CE
-.L83CB LDA &C2D0,X
-.L83CE JSR L8451
+.L83CB LDA &C2D0,X	; Get sector
+.L83CE JSR L8451	; Store in error block in hex
        DEX
-       BPL L83CB
+       BPL L83CB	; Loop for 2+3 bytes
        INY
        LDA #&00
-       STA &0100,Y
-.L83DA LDA &C2D5
-       BEQ L840F
+       STA &0100,Y	; Store terminating &00
+.L83DA LDA &C2D5	; Get channel being used
+       BEQ L840F	; Random access not being used, generate the error
        LDX #&0B
-       DEY
-.L83E2 LDA L8445,X
+       DEY		; Step back to overwrite terminator
+.L83E2 LDA L8445,X	; Insert ' on channel '
        INY
        STA &0100,Y
        DEX
        BPL L83E2
-       LDA &C2D5
-       JSR L846D
-       PHY
+       LDA &C2D5	; Get channel
+       JSR L846D	; Insert channel number in decimal
+       PHY		; Save offset into error block
        LDA #&C6
        STA &C2D9
-       JSR L84C4
-       CPX &C2D5
+       JSR L84C4	; OSBYTE &C6, read Exec and Spool handles
+       CPX &C2D5	; Error while using Exec channel?
        PHP
-       LDX #&BD
+       LDX #<L84BD	; Point to '*Exec'
        PLP
-       BEQ L840B
-       CPY &C2D5
-       BNE L840E
-       LDX #&C0
-.L840B JSR L84D3
-.L840E PLY
-.L840F LDA &C2CE
-       BNE L8417
-       JSR LA7D4
+       BEQ L840B	; Yes, jump to close Exec file
+       CPY &C2D5	; Error while using Spool channel?
+       BNE L840E	; No, jump to finish error
+       LDX #<L84C0	; Point to '*Spool'
+.L840B JSR L84D3	; Close Exec or Spool file
+.L840E PLY		; Get offset into error block back
+.L840F LDA &C2CE	; Get workspace checksum
+       BNE L8417	; Not &00, finish the error
+       JSR LA7D4	; Recalculate and update workspace checksum
 .L8417 LDA #&00
-       STA &0100
-       STA &0101,Y
-       JSR L803A
-       LDA &0101
-       CMP #&C7
-       BNE L843D
+       STA &0100	; Insert BRK
+       STA &0101,Y	; Insert error terminator
+       JSR L803A	; Release Tube, restore screen memory
+       LDA &0101	; Get error number
+       CMP #&C7		; Is it 'Disc error'?
+       BNE L843D	; No, execute the error
        DEC A
-       JSR L84C4
-       PHY
-       TXA
-       LDX #<L84BD
-       JSR L84CB
-       PLA
-       LDX #<L84C0
-       JSR L84CB
+       JSR L84C4	; OSBYTE &C6, read Exec and Spool handles
+       PHY		; Save Spool handle
+       TXA		; Get Exec handle in A
+       LDX #<L84BD	; Point to '*Exec'
+       JSR L84CB	; Close if *EXEC handle
+       PLA		; Get Spool handle back
+       LDX #<L84C0	; Point to '*Spool'
+       JSR L84CB	; Close if *SPOOL handle
        JSR L849A
 .L843D JMP &0100
 
-;;
 .L8440 EQUS ": ta "
 .L8445 EQUS " lennahc no "
+
+; Insert hex number into error block
+; ----------------------------------
 .L8451 PHA
        LSR A
        LSR A
@@ -1135,8 +1187,10 @@ ENDIF
        BCC L846C
        ADC #&06
 .L846C RTS
-;;
-.L846D BIT L8483
+
+; Insert decimal number into error block
+; --------------------------------------
+.L846D BIT L8483	; Set V
        LDX #&64
        JSR L847D
        LDX #&0A
@@ -1805,9 +1859,9 @@ ENDIF
 ;;
 .L8930 LDX #&01
        LDY #&03
-       LDA (&B6),Y
-       BPL L8939
-       INX
+       LDA (&B6),Y	; Check 'D' bit
+       BPL L8939	; Not a directory, return X=1
+       INX		; Directory, return X=2
 .L8939 STX &C2C0
        LDA #&00
        RTS
@@ -1824,8 +1878,8 @@ ENDIF
        BNE L8941
 .L8953 STY &C2A2
 .L8956 LDY #&03
-       LDA (&B6),Y
-       BMI L897B
+       LDA (&B6),Y	; Check 'D' bit
+       BMI L897B	; Directory, jump to check bit 9
        JSR L8964
        BEQ L8956
 .L8961 LDA #&FF
@@ -1834,7 +1888,7 @@ ENDIF
 ; Step to next directory entry
 ; ----------------------------
 ; Directory pointer at &B6/7=&B6/7+26
-IF OPTIMISE>=1
+IF OPTIMISE>=2
 .NextEntry
 	LDA #&1A
 .NextEntryA
@@ -1854,7 +1908,7 @@ ENDIF
 ENDIF
 
 .L8964
-IF OPTIMISE<1
+IF OPTIMISE<2
 	CLC		; Step to next directory entry
 	LDA &B6		; &B6/7=&B6/7+26
 	ADC #&1A
@@ -1872,11 +1926,11 @@ ENDIF
 	RTS
 ;;
 .L897B LDY #&09
-       LDA (&B6),Y
-       BPL L8997
+       LDA (&B6),Y	; Check access bit 9
+       BPL L8997	; Not set
        AND #&7F
-       STA (&B6),Y
-       JSR L8F91
+       STA (&B6),Y	; Remove the bit
+       JSR L8F91	; Write directory to disk
 .L8988 JSR L836B
        EQUB &B0         ;; ERR=176
        EQUS "Bad rename"
@@ -1979,13 +2033,13 @@ ENDIF
 ;; CD00-FF Random access buffer 5
 ;;
 ;; C200-14
-;; C215-23 SCSI control block
+;; C215-23 Disk access control block
 ;; C224-27
 ;; C228-2B
 ;; C22C-2F Current Selected Directory?
 ;; C230-33
 ;; C234-37 Current object sector
-;; C238-61
+;; C238-3F
 ;; C240-51 Control block for commands translated to OSFILE calls
 ;; C262-6B Current object name
 ;;
@@ -2013,7 +2067,7 @@ ENDIF
 
 ;; User Disk Access
 ;; ================
-;; Do a disk access using SCSI protocol. Control block at &C215-&C224
+;; Do a disk access using SCSI API. Control block at &C215-&C224
 ;;
 ;;    Addr Ctrl
 ;;   &C215  Returned result
@@ -2270,8 +2324,7 @@ ELSE
        BNE L8BA2        ;; Loop for all 256 bytes
 ENDIF
 ;;
-.L8BBB
-       JMP L81AD        ;; Jump get result and return
+.L8BBB JMP L81AD        ;; Jump get result and return
 ;;
 .L8BBE JSR L8870
        BEQ L8BCA
@@ -2414,8 +2467,10 @@ IF FULL_ACCESS
        LDY #&0E
        STA (&B8),Y
        RTS
+IF NOT(TRIM_REDUNDANT)
        NOP
        NOP
+ENDIF
 ELSE
        LDA #&00
        STA &C22B        ;; Clear byte for access
@@ -2474,7 +2529,7 @@ ENDIF
 .L8CD1 JMP L89D5
 ;;
 .L8CD4
-IF OPTIMISE<1
+IF OPTIMISE<2
 	LDY #&00	; Copy filename pointer to &B4/5
 	LDA (&B8),Y	; Control+0
 	STA &B4
@@ -2520,7 +2575,7 @@ ENDIF
 ;;
 .L8D1B LDY #&02
        LDA (&B6),Y	;; Check 'L' bit
-       BPL L8D2C	;; Not locked, jump to continue
+       BPL L8D2C	;; Not locked, jump to check if open
        JSR L836B
        EQUB &C3         ;; ERR=195
        EQUS "Locked"
@@ -2549,10 +2604,9 @@ ENDIF
        CMP &C3F2,X
        BNE L8D74
 .L8D5E JSR L836B
-       EQUB &C2         ;; ERR=194
+       EQUB &C2		; ERR=194
        EQUS "Can't - File open"
        EQUB &00
-;;
 .L8D74 DEX
        BPL L8D2E
        INX
@@ -2627,7 +2681,7 @@ ENDIF
 ;;
 .L8DFE JSR L8CF4
 .L8E01 BNE L8E24
-       LDX #&02
+.L8E03 LDX #&02
        LDY #&12
        LDA (&B6),Y
        CMP #&01
@@ -2740,11 +2794,11 @@ ELSE
 	LDA (&B6),Y	; Get first byte of directory entry
 ENDIF
 	BEQ L8EF8	; &00 - end of directory
-.L8ECF	LDY #&19	; Point to ...
+.L8ECF	LDY #&19	; Point to object's sequence number
 	LDA (&B6),Y
 	CMP &C8FA
 	BEQ L8EE7
-IF OPTIMISE<1
+IF OPTIMISE<2
 	CLC		;; Step to next entry
 	LDA &B6		;; &B6/7=&B6/7+26
 	ADC #&1A
@@ -3158,7 +3212,9 @@ ENDIF
        EQUS "Dir not empty"
        EQUB &00
 ;;
-.L9177 LDY #&12
+.L9177
+IF OPTIMISE<4
+       LDY #&12
        LDX #&02
        LDA (&B6),Y
        CMP #&01
@@ -3175,6 +3231,9 @@ ENDIF
        DEY
        DEX
        BPL L918E
+ELSE
+       JSR L8E03
+ENDIF
        LDY #&03
        LDA (&B6),Y	;; Get 'D' bit
        BPL L921B	;; Not a directory
@@ -3275,7 +3334,7 @@ ENDIF
        LDA L9271+0,X
        PHA		;; Stack low byte of address-1
        PHY              ;; Stack function
-IF OPTIMISE<1
+IF OPTIMISE<2
        LDY #&00		;; Get filename address
        LDA (&B8),Y
        STA &B4
@@ -3288,7 +3347,7 @@ ENDIF
        PLA              ;; Get function to A
 .L9270 RTS              ;; Jump to subroutine
 
-IF OPTIMISE>=1
+IF OPTIMISE>=2
 ; Get filename address from control block to &B4/5
 ; ------------------------------------------------
 .GetFilename
@@ -3525,7 +3584,7 @@ ENDIF
 ;;
 .L93FC	JSR LA036	; Print a space without spooling
 .L93FF
-IF OPTIMISE<1
+IF OPTIMISE<2
 	CLC		; Step to next entry
 	LDA &B6		; &B6/7=&B6/7+26
 	ADC #&1A
@@ -3569,7 +3628,7 @@ ELSE
 ENDIF
 	BEQ L9423	; &00 - end of directory
 .L9446	JSR L9508	; Print info for this entry
-IF OPTIMISE<1
+IF OPTIMISE<2
 	CLC		; Step to next entry
 	LDA &B6		; &B6/7=*B6/7+26
 	ADC #&1A
@@ -3806,7 +3865,7 @@ ENDIF
        JSR L8F5D
        LDY #&03		;; Point to 'D' bit
 .L95D6
-IF OPTIMISE<1
+IF OPTIMISE<2
 	LDA (&B6),Y	; Set attribute bit
 	ORA #&80
 	STA (&B6),Y
@@ -3817,7 +3876,7 @@ ENDIF
 	CPY #&01
 	BNE L95D6
 	DEY
-IF OPTIMISE<1
+IF OPTIMISE<2
 	LDA (&B6),Y	; Set attribute bit
 	ORA #&80
 	STA (&B6),Y
@@ -4078,7 +4137,7 @@ ENDIF
        LDA &B7
        STA &B5
 .L9811
-IF OPTIMISE<1
+IF OPTIMISE<2
 	LDA &B6		;; Step to next entry
 	CLC		;; &B6/7=&B6/7+26
 	ADC #&1A
@@ -4232,7 +4291,7 @@ ENDIF
        LDA (&C0),Y
        STA &B6
 .L9930
-IF OPTIMISE<1
+IF OPTIMISE<2
 	CLC		; Step to next entry
 	LDA &B6		; &B6/7=*B6/7+26
 	ADC #&1A
@@ -4303,7 +4362,7 @@ ENDIF
        BNE L99AA        ;; Jump past if not setting 'E'
        JSR L994A        ;; Clear all other bits
        LDY #&04		;; Point to 'E' bit
-IF OPTIMISE<1
+IF OPTIMISE<2
 	LDA (&B6),Y	; Set 'E' attribute bit
 	ORA #&80
 	STA (&B6),Y
@@ -4333,7 +4392,7 @@ ENDIF
 .L99CE PHY
        TXA
        TAY
-IF OPTIMISE<1
+IF OPTIMISE<2
        LDA (&B6),Y	; Set access bit
        ORA #&80
        STA (&B6),Y
@@ -4343,7 +4402,7 @@ ENDIF
        PLY
        BRA L99BD
 
-IF OPTIMISE>=1
+IF OPTIMISE>=2
 .SetAttr
        LDA (&B6),Y	;; Set access bit
        ORA #&80
@@ -4392,7 +4451,7 @@ ENDIF
        PHA
        BIT &FF
        BPL L9A36
-       JMP L82CC
+       JMP L82CC	;; Jump to give 'Escape' error
 ;;
 .L9A36 JSR L8FE8
        BNE L9A47
@@ -6035,12 +6094,12 @@ ENDIF
 .LA533 RTS
 ;;
 .LA534 
-       LDY #&00		;; Caller may need this
-       LDA (&B4),Y	;; Check first character of filename
+       LDY #&00		; Caller may need this
+       LDA (&B4),Y	; Check first character of filename
        AND #&7F
-       CMP #&3A
-       BNE LA533
-.LA53E JMP L8988
+       CMP #&3A		; Can't rename to '*'
+       BNE LA533	; Not '*', exit as ok
+.LA53E JMP L8988	; Jump to 'Bad rename'
 ;;
 .LA541 LDA &B4
        PHA
@@ -6052,26 +6111,25 @@ ENDIF
        BEQ LA555
        JMP L8BD3
 ;;
-.LA555 
-       LDY #&03
-       LDA (&B6),Y	;; Check 'D' bit
-       JSR L89D8
-       BPL LA580
+.LA555 LDY #&03
+       LDA (&B6),Y	; Check 'D' bit
+       JSR L89D8	; Load FSM
+       BPL LA580	; Not a directory
        PLX
        PLA
        STA &B4
        STX &B5
        PHA
        PHX
-       LDY #&00		;; Caller may need this
-       LDA (&B4),Y
+       LDY #&00		; Caller may need this
+       LDA (&B4),Y	; Get first character
        AND #&7D
-       CMP #&24
-       BEQ LA53E
+       CMP #&24		; Is it '$' or '&'
+       BEQ LA53E	; If ROOT or URD, jump to 'Bad rename'
 .LA570 JSR L8743
        BEQ LA57C
        CMP #&5E
-       BEQ LA53E
+       BEQ LA53E	; Can't rename '^', jump to 'Bad rename'
 .LA579 INY
        BNE LA570
 .LA57C CMP #&2E
@@ -6084,7 +6142,7 @@ ENDIF
        STA &B9
        JSR L8CED
        PHP
-       JSR L8E01
+       JSR L8E01	; Check
        PLP
        BNE LA5A5
        LDA &B6
@@ -6112,7 +6170,7 @@ ENDIF
        LDY #&03
        LDA &B6
 .LA5CA CMP &C234,Y
-       BNE LA625
+       BNE LA625	; Set bit 9
        LDA &C313,Y
        DEY
        BPL LA5CA
@@ -6156,12 +6214,12 @@ ENDIF
        JSR LA6BB
        JMP L89D8
 ;;
-.LA622 JMP L95AB
+.LA622 JMP L95AB	; Error 'Already exists'
 ;;
 .LA625	LDA &C237
-	BNE LA622
+	BNE LA622	; <>&00, jump to 'Already exists'
 	LDY #&09	; What uses access bit 9?
-IF OPTIMISE<1
+IF OPTIMISE<2
 	LDA (&B6),Y	; Set attribute bit
 	ORA #&80
 	STA (&B6),Y
@@ -6496,7 +6554,7 @@ ENDIF
        BPL LA8C7	;; Not 'E' and not 'D'
 .LA8B8 BIT &FF
        BPL LA8BF
-       JMP L82CC
+       JMP L82CC	;; Jump to give 'Escape' error
 ;;
 .LA8BF JSR L8964
        BEQ LA8AF
@@ -6655,6 +6713,7 @@ ENDIF
        LDA &C3AC,Y
        BPL LAA16
 .LA9E2 LDX &C3
+IF OPTIMISE<4
        LDA &00,X
        STA &C29A
        LDA &01,X
@@ -6666,7 +6725,10 @@ ENDIF
        JSR LAE68
        LDX &C3
        LDY &CF
-       LDA &00,X
+ELSE
+       JSR ArgsData	; Copy data to channel info
+ENDIF
+.LA9FF LDA &00,X
        STA &C37A,Y
        LDA &01,X
        STA &C370,Y
@@ -6688,6 +6750,7 @@ ENDIF
        LDA &C334,Y
        SBC &03,X
        BCC LAA48
+IF OPTIMISE<4
        LDA &00,X
        STA &C37A,Y
        LDA &01,X
@@ -6697,14 +6760,18 @@ ENDIF
        LDA &03,X
        STA &C35C,Y
        JMP LA9D0
+ELSE
+       BCS LA9FF
+ENDIF
+
 ;;
 .LAA48 JSR L836B
        EQUB &B7         ;; ERR=183
        EQUS "Outside file"
        EQUB &00
-;;
-;; OSARGS 2,Y - Read EXT
-;; ---------------------
+
+; OSARGS 2,Y - Read EXT
+; ---------------------
 .LAA59 DEX
        BNE LAA75
        LDX &C3
@@ -6717,9 +6784,9 @@ ENDIF
        LDA &C334,Y
        STA &03,X
 .LAA72 JMP LA9D0
-;;
-;; OSARGS 3,Y - Write EXT
-;; ----------------------
+
+; OSARGS 3,Y - Write EXT
+; ----------------------
 .LAA75 DEX
        BNE LAAB9
        LDX &C3
@@ -6727,7 +6794,9 @@ ENDIF
        BMI LAA82
        JMP LB0FA
 ;;
-.LAA82 LDA &00,X
+.LAA82
+IF OPTIMISE<4
+       LDA &00,X
        STA &C29A
        LDA &01,X
        STA &C29B
@@ -6738,6 +6807,9 @@ ENDIF
        JSR LAE68
        LDX &C3
        LDY &CF
+ELSE
+       JSR ArgsData	; Copy data to channel info
+ENDIF
        LDA &00,X
        STA &C352,Y
        LDA &01,X
@@ -6749,7 +6821,23 @@ ENDIF
        JSR LAD25
        BCS LAA72
        JMP LA9E2
-;;
+
+IF OPTIMISE>=4
+.ArgsData
+       LDA &00,X
+       STA &C29A
+       LDA &01,X
+       STA &C29B
+       LDA &02,X
+       STA &C29C
+       LDA &03,X
+       STA &C29D
+       JSR LAE68
+       LDX &C3
+       LDY &CF
+       RTS
+ENDIF
+
 ;; OSARGS 4+,Y - treat as OSARGS &FF,Y - Ensure File
 ;; -------------------------------------------------
 .LAAB9 LDX #&10
@@ -6821,15 +6909,13 @@ IF HD_SCSI
 ENDIF
 ;;
 .LAB03 JSR LACE6        ;; Check checksum
-.LAB06 JSR LABB4        ;; Check for data lost
+.LAB06
+IF NOT(HD_MMC)
+       JSR LABB4        ;; Check for IRQ flagging data lost
+ENDIF
        LDA &C204,X
        CMP #&C0
-IF HD_MMC
-       BCS LAB10
-       JMP LAB88	;; Exit
-ELSE
        BCC LAB88	;; Exit
-ENDIF
 .LAB10 TXA
        LSR A
        LSR A
@@ -6843,7 +6929,7 @@ ENDIF
        AND #&1E
        ROR A
        ORA #&30
-       STA &C2D4
+       STA &C2D4	; Save channel number for error message
        LDA &C201,X
        STA &C2D0
        LDA &C202,X
@@ -6864,8 +6950,8 @@ IF FLOPPY
        BEQ LAB86
        DEC &CE
        BPL LAB50
-       JMP L82BD        ;; Generate disk error
 ENDIF
+.LAB5B JMP L82BD        ;; Generate disk error
 ;;
 ;; BPUT to hard drive
 ;; --------------------
@@ -6873,8 +6959,8 @@ ENDIF
 	LDA #&0A	; &0A - Write
 	JSR LAAD9	; Send command block to SCSI/IDE/SD
 IF HD_MMC
-	BNE LAB76	; No error, jump to write
-.LAB67	JMP L82BD	; Generate a disk error
+	BNE LAB5B	; Error, generate a disk error
+			; Fall through to write
 ENDIF
 IF HD_IDE
        LDY #&00
@@ -6915,10 +7001,10 @@ IF HD_MMC
        LDA &BD
        STA &B3
        JSR MMC_StartWrite
-       BNE LAB67	; Error occured
+       BNE LAB5B	; Error occured
        JSR MMC_Write256
        JSR MMC_EndWrite
-       BNE LAB67	; Error occured
+       BNE LAB5B	; Error occured
        PLA
        STA &B3
        PLA
@@ -6941,14 +7027,15 @@ IF HD_IDE
        NOP
 ENDIF
 .LAB86 LDX &C1		;; Restore X, offset to channel info
+IF HD_MMC
+.LAB89			;; Null IRQ routine
+ENDIF
 .LAB88 RTS
 ;;
 ;; Service 5 - Interupt occured
 ;; ============================
-IF NOT(HD_SCSI)
-.LAB89 RTS              ;; Remove IRQ routine
-ENDIF
 IF HD_IDE
+.LAB89 RTS              ;; Remove IRQ routine
 .UpdateDrive
        LDA &85          ;; Merge with current drive
        ORA &C317
@@ -6977,30 +7064,40 @@ IF HD_SCSI
        TRB &CD
        LDA &FC40
        JSR L8332
-       ORA &FC40
-       STA &C331
-       JMP L9DB4        ;; Restore Y,X, claim call
+       ORA &FC40	; Get SCSI result
+       STA &C331	; Save for error handler later
+       JMP L9DB4        ; Restore Y,X, claim call
 ENDIF
-;;
-;;
-;; Check for data loss
-;; ===================
-.LABB4 LDA &C331
-       BEQ LABE6        ;; Jump forward to exit
+
+
+; Check for data loss
+; ===================
+; IDE and MMC don't have IRQ handlers, this never happens
+IF NOT(HD_MMC)
+.LABB4 LDA &C331	; Get SCSI result from IRQ handler
+       BEQ LABE6        ; Ok, jump forward to exit
        LDA #&00
-       STA &C331        ;; Clear the flag
-       LDX &C2D4
-       JSR L8374        ;; Generate 'Data lost' error
-       EQUB &CA         ;; ERR=202
+       STA &C331        ; Clear the flag
+       LDX &C2D4	; Get channel being used
+IF OPTIMISE<3
+	JSR L8374	; Generate 'Data lost' error with X=channel
+ELSE
+	STX &C2D5	; Store channel for error generation
+	JSR L8372	; Generate 'Data lost' error +' on channel NNN'
+ENDIF
+       EQUB &CA         ; ERR=202
        EQUS "Data lost, channel"
        EQUB &00
-;;
+ENDIF
+
+; Get pointer to channel buffer
+; -----------------------------
 .LABD8 TXA
        STX &C2A1
        LSR A
        LSR A
        ADC #&C9
-       STA &BF
+       STA &BF		; &BE/F=>buffer at &C900+256*handle
        LDA #&00
        STA &BE
 .LABE6 RTS
@@ -7279,6 +7376,7 @@ ENDIF
 ;; Read byte from channel
 ;; ----------------------
 .LAD9C LDX &CF          ;; Get channel offset
+IF OPTIMISE<4
        CLC
        LDA &C3CA,X
        ADC &C370,X
@@ -7288,11 +7386,15 @@ ENDIF
        STA &C297
        LDA &C3B6,X
        ADC &C35C,X
-       STA &C298	;; &C296/7/8=&C3CA/B/C,X+&C370/1/2,X
+       STA &C298	; &C296/7/8=&C3CA/B/C,X+&C370/1/2,X
        LDA #&40
-       JSR LABE7	;; Manipulate various things
+       JSR LABE7	; Manipulate various things
        LDX &CF
-       LDY &C37A,X
+       LDY &C37A,X	; Y=low byte of PTR, offset into buffer
+ELSE
+       LDA #&40
+       JSR ChannelUpdate
+ENDIF
        LDA #&00
        STA &C2CF
        JSR LB180
@@ -7680,7 +7782,9 @@ ENDIF
        DEC &C2CF
        JSR LAE68
        LDX &CF
-.LB14D CLC
+.LB14D
+IF OPTIMISE<4
+       CLC
        LDA &C3CA,X
        ADC &C370,X
        STA &C296
@@ -7694,15 +7798,39 @@ ENDIF
        JSR LABE7
        LDX &CF
        LDY &C37A,X
+ELSE
+       LDA #&C0
+       JSR ChannelUpdate
+ENDIF
        PLA
-       STA (&BE),Y
+       STA (&BE),Y	; Store byte in buffer
        PHA
        JSR LB180
        PLA
        LDY &C2
        LDX &C3
 .LB17F RTS
-;;
+
+IF OPTIMISE>=4
+.ChannelUpdate
+       PHA
+       CLC
+       LDA &C3CA,X
+       ADC &C370,X
+       STA &C296
+       LDA &C3C0,X
+       ADC &C366,X
+       STA &C297
+       LDA &C3B6,X
+       ADC &C35C,X
+       STA &C298	; &C296/7/8=&C3CA/B/C,X+&C370/1/2,X
+       PLA
+       JSR LABE7	; Manipulate various things
+       LDX &CF
+       LDY &C37A,X	; Y=low byte of PTR, offset into buffer
+       RTS
+ENDIF
+
 .LB180 LDX &CF
        INC &C37A,X
        BNE LB17F
@@ -7820,7 +7948,9 @@ ENDIF
        LDA #&00
        JMP LB336
 ;;
-.LB275 LDX #&09
+.LB275
+IF OPTIMISE<4
+       LDX #&09
 .LB277 LDA &C3AC,X
        BPL LB2AA
        LDA &C3B6,X
@@ -7841,18 +7971,19 @@ ENDIF
        CMP &C3F2,X
        BNE LB2AA
        JMP L8D5E
-;;
 .LB2AA DEX
        BPL LB277
+ELSE
+       JSR L8D2C	; Check file not open
+ENDIF
 IF USE65C12
        LDA (&B6)	;; Check 'R' bit
 ELSE
        LDY #&00
        LDA (&B6),Y	;; Check 'R' bit
 ENDIF
-       BMI LB2B6	;; 'R' set, ...
+       BMI LB2B6	;; 'R' set, file can be opened
        JMP L8BFB	;; 'R' not set, jump to error
-;;
 .LB2B6 LDY #&12
        LDX &CF
        LDA (&B6),Y
@@ -7923,14 +8054,13 @@ ENDIF
        LDA #&00
        PLP
        BNE LB336
-       JSR L8D2C
+       JSR L8D2C	; Check if file is open
        LDY #&01
-       LDA (&B6),Y
-       BMI LB358
+       LDA (&B6),Y	; Check 'W' bit
+       BMI LB358	; 'W' present, can open file for writing
 .LB355 JMP L8BFB
-;;
 .LB358 JMP LB275
-;;
+
 .LB35B JSR L8DC8
        JSR L8FE8
        BNE LB36F
@@ -8984,7 +9114,7 @@ IF FLOPPY
 ;  b2-b0 FDrive
 ;
 .LBBDE
-IF OPTIMISE<1
+IF OPTIMISE<2
 	STZ &0D56	; Set to zero
 	STZ &C2E8	; Set to zero
 	LDX #&0B	; &0B=ADFS CMOS byte
@@ -9430,7 +9560,7 @@ ENDIF
        BVC LBF24        ;; Drive 0,1,4,5 -> jump ahead
 ;;                         Can patch here to support drive 2,3,6,7
        LDA #&65         ;; Otherwise, floppy error &25 (Bad drive)
-IF OPTIMISE<1
+IF OPTIMISE<2
        STA &A0          ;; Set error
        BNE LBF73        ;; Jump to return error
 ELSE
@@ -9491,7 +9621,10 @@ ENDIF
 .LBF73 BNE LBFB7	;; Jump to return error in &A0
 
 IF NOT(TRIM_REDUNDANT)
-;; This code never entered, as the above BCC LBF75 never followed
+; This code never entered, as the above BCC LBF75 is never followed.
+; It seems as though it is attempting to check if sector+length would span
+; past the end of the disk, but any transfer that starts before the end of
+; the disk has already been filtered out and accepted as valid.
 .LBF75 LDA &A1		;; Get flag
        AND #&10
        BEQ LBF8F	;; If b3=0, do it anyway

@@ -61,3 +61,8 @@ Chopped out redundant floppy sector range test, redundant *DELETE entry
 if building for Master. Moved some MMC calls to more appropriate places.
 Optimised some inline code into subroutines, used 65C12 code where possible.
 
+adfs.asm, 28-Mar-2016
+---------------------
+Rewritten disk error generation, crunched OSARGS, BGET/BPUT update, CheckOpen.
+Probably the biggest optimisations done. Down to about 180 bytes too long.
+Will start going through Zorn's high-crunch optimisations.
