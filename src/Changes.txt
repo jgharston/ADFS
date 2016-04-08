@@ -66,3 +66,7 @@ adfs.asm, 28-Mar-2016
 Rewritten disk error generation, crunched OSARGS, BGET/BPUT update, CheckOpen.
 Probably the biggest optimisations done. Down to about 180 bytes too long.
 Will start going through Zorn's high-crunch optimisations.
+
+adfs.asm, 08-Apr-2016
+---------------------
+Tail optimised converting disk_addr to side/track/sector.

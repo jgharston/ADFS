@@ -10,15 +10,25 @@
 ; build:
 ; ADFS Master SCSI v1.50r9
 ; ADFS Master IDE  v1.53r21
-; ADFS Master MMC  needs more optimisation to fit into 16K
+; ADFS Master MMC  needs about 130 bytes more optimisation to fit into 16K
 
 
 ; OPTIMISE flag sets how hard to optimise
 ; 1 Use 65C12 coding where possible
-; 2 Subroutines for ReadCMOS, GetFilename, SetAttr, NextEntry, DiskSpeed
+; 2 Subroutines for ReadCMOS, DiskSpeed, SetAttr, GetFilename, NextEntry
 ; 3 Rewritten disk error generation
 ; 4 Crunch OSARGS, BGET/BPUT update, CheckOpen
+; 5 Crunch converting sector_address to side/track/sector
 
+; Testing
+;  TRIM_REDUNDANT works.
+;  OPTIMISE=1 works (use 65c12 ops)
+;  OPTIMISE=2 works (subroutines for major chunks)
+;  OPTIMISE=3 works (rewritten disk error routine)
+;  OPTIMISE=4 fails:
+;   *DUMP !Boot gives File Open
+;  OPTIMISE=5 untested
+;
 
 ; Sanity check
 ; ------------
@@ -850,7 +860,7 @@ ENDIF
 
 ; Translate some disk results into their own error message
 ; ========================================================
-; Return results are &00+xx for HDD, &40+xx for FDD
+; Return results are &00 for ok, &00+xx for HDD, &40+xx for FDD
 ; &00    - Ok
 ; &00+xx - hard drive error
 ; &40+xx - floppy error
@@ -1239,15 +1249,18 @@ ENDIF
 ;;
 .L84C0 EQUS "SP."       ;; Abbreviation of 'Spool'
        EQUB &0D
-;;
-;; OSBYTE READ
-;; -----------
+IF (L84BD AND &FF00) <> (L84C0 AND &FF00)
+	ERROR "Exec/Spool table run over page boundary"
+ENDIF
+
+; OSBYTE READ
+; -----------
 .L84C4 LDY #&FF
 .L84C6 LDX #&00
        JMP &FFF4        ;; Osbyte A,&00,&FF
-;;
-;; Close Spool or Exec if ADFS channel
-;; -----------------------------------
+
+; Close Spool or Exec if ADFS channel
+; -----------------------------------
 .L84CB CMP #&30         ;; Check against lowest ADFS handle
        BCC L84BC        ;; Exit if not ADFS
        CMP #&3A         ;; Check against highest ADFS handle
@@ -1414,7 +1427,7 @@ ENDIF
        PLP
        RTS
 ;;
-.L85EB LDA &C1FE
+.L85EB LDA &C1FE	; Pointer to end of FSM
        CMP #&F6
        BCC L85FF
        JSR L834E
@@ -1441,9 +1454,9 @@ ENDIF
        INY
        CPY #&03
        BNE L8617
-       LDA &C1FE
-       ADC #&02
-       STA &C1FE
+       LDA &C1FE	; Point to end of FSM
+       ADC #&02		; Add 3 (2+Cy) to point to next entry
+       STA &C1FE	; Update pointer to end of FSM
 .L8631 RTS
 ;;
 .L8632 LDX #&00
@@ -1465,7 +1478,11 @@ ENDIF
        CPY #&03
        BNE L8646
        PLP
+IF USE65C12
+       BRA L863D
+ELSE
        JMP L863D
+ENDIF
 ;;
 .L865B LDX #&FF
        STX &B3
@@ -1801,7 +1818,7 @@ ENDIF
        TSB &CD          ;; Set 'FSM inconsistant' flag
        LDX #<L8831      ;; Point to 'load FSM' control block
        LDY #>L8831
-       JSR &82AE	  ;; Load FSM
+       JSR L82AE	  ;; Load FSM
        LDA #&10
        TRB &CD            ;; Clear 'FSM inconsistant' flag
        LDA &C22E
@@ -1816,9 +1833,14 @@ ENDIF
        JSR L82AE        ;; Load '$'
        LDA #&02
        STA &C314        ;; Set CURR to &000002 - '$'
+IF USE65C12
+       STZ &C315
+       STZ &C316
+ELSE
        LDA #&00
        STA &C315
        STA &C316
+ENDIF
        JSR LB4B9
        LDY #&00
        JSR L8743
@@ -1828,8 +1850,8 @@ ENDIF
 .L88EF LDY #&00
        JSR L8743
        AND #&FD
-       CMP #&24
-       BEQ L8896
+       CMP #&24		; Is it '$' or '&'
+       BEQ L8896	; Reference to ROOT or URD
        JSR LB546
 .L88FD JSR L9456
        BNE L892A
@@ -1924,7 +1946,7 @@ ENDIF
 	JSR L8756	; Check directory entry is valid
 	BNE L8964	; Step to next entry
 	RTS
-;;
+
 .L897B LDY #&09
        LDA (&B6),Y	; Check access bit 9
        BPL L8997	; Not set
@@ -1935,7 +1957,7 @@ ENDIF
        EQUB &B0         ;; ERR=176
        EQUS "Bad rename"
        EQUB &00
-;;
+
 .L8997 LDA &C2A2
        SEC
        ADC &B4
@@ -1951,23 +1973,22 @@ ENDIF
        DEY
        BPL L89AB
 .L89B4 LDX #&0A
-.L89B6 LDA &883C,X
-       STA &C215,X
+.L89B6 LDA L883C,X	; Get byte from 'load $' control block
+       STA &C215,X	; Store into workspace control block
        DEX
        BPL L89B6
        LDX #&02
-       LDY #&16
-.L89C3 LDA (&B6),Y
-       STA &C21B,X
-       STA &C2FE,Y
+       LDY #&16		; Point to object's SECT entry
+.L89C3 LDA (&B6),Y	; Copy object's SECT entry to workspace
+       STA &C21B,X	; Workspace control block is now a
+       STA &C2FE,Y	; 'load directory' control block
        INY
        DEX
        BPL L89C3
-       JSR L82AA
-       JMP L88FD
-;;
+       JSR L82AA	; Do disk access, load the directory
+       JMP L88FD	; Jump to parse next path component
+
 .L89D5 LDA &C2C0
-;;
 .L89D8 PHA
        LDA &C22F
        CMP #&FF
@@ -1987,9 +2008,9 @@ ENDIF
        STA &C215,Y      ;; load '$'
        DEY
        BPL L89F9
-       STX &C316        ;; Copy parameters to &C215
-       STX &C21B
-       LDA &C22D
+       STX &C316        ; Copy parameters to &C215
+       STX &C21B	; Modify control block to be
+       LDA &C22D	; 'load directory' control block
        STA &C315
        STA &C21C
        LDA &C22C
@@ -1997,7 +2018,7 @@ ENDIF
        STA &C21D
        LDA #&FF
        STA &C22E
-       JSR L82AA        ;; Do disk op from &C215
+       JSR L82AA        ; Do disk access, load the directory
 .L8A22 LDA &CD
        STA &C320
        JSR LA744        ;; Get WS address in &BA
@@ -2230,7 +2251,7 @@ ENDIF
 IF FLOPPY
        BMI L8B2C        ;; Jump back with floppies
 ENDIF
-IF HD_IDE
+IF HD_IDE AND NOT(TRIM_REDUNDANT)
        JSR X807E        ;; Leftover dummy call
 ENDIF
 IF HD_SCSI
@@ -2401,8 +2422,12 @@ ENDIF
        STA &C215        ;; Set flag byte to 1
        LDA #&08
        STA &C21A        ;; Command 'read'
+IF USE65C12
+       STZ &C21F
+ELSE
        LDA #&00
        STA &C21F
+ENDIF
        LDY #&16
        LDX #&03
 .L8C4E LDA (&B6),Y
@@ -2808,8 +2833,11 @@ IF OPTIMISE<2
 	BCS L8ECB
 ELSE
 	JSR NextEntry	; Step to next entry
-	BNE L8ECF	; Not end of directory, loop back
-	BEQ L8EF8	; End of directory
+IF USE65C12
+	BRA L8ECB	; Loop back
+ELSE
+	JMP L8ECB	; Loop back
+ENDIF
 ENDIF
 
 .L8EE7 LDA &C8FA
@@ -2819,7 +2847,11 @@ ENDIF
        CLD
        STA &C8FA	;; Store checksum at end of dir
        STA &C400	;; Store checksum at start of dir
+IF USE65C12
+       BRA L8EC3
+ELSE
        JMP L8EC3
+ENDIF
 ;;
 .L8EF8 PLA		;; Save dir entry pointer
        STA &B7
@@ -2837,10 +2869,15 @@ ENDIF
        BNE L8F0C
        LDA #&0A
        STA &C21A
+IF USE65C12
+       STZ &C21E
+       STZ &C21F
+ELSE
        LDA #&00
        STA &C21E
        LDA #&00
        STA &C21F
+ENDIF
        LDY #&12
 .L8F26 LDA (&B6),Y
        STA &C20E,Y
@@ -2891,7 +2928,11 @@ ENDIF
 ;;
 .L8F7F JSR L8F57
        JSR L8A42
+IF USE65C12
+       BRA L8F8B
+ELSE
        JMP L8F8B
+ENDIF
 ;;
 .L8F88 JSR L8F57
 .L8F8B JSR L8F91
@@ -2901,13 +2942,13 @@ ENDIF
 .L8F91 JSR LA714
        JSR L9012
        LDX #&0A
-.L8F99 LDA &883C,X
+.L8F99 LDA L883C,X	; Copy control block to load '$'
        STA &C215,X
        DEX
        BPL L8F99
        LDA #&0A
-       STA &C21A
-       LDA &C314
+       STA &C21A	; Change to 'Write'
+       LDA &C314	; Change sector to new dir to create
        STA &C21D
        LDA &C315
        STA &C21C
@@ -2915,7 +2956,7 @@ ENDIF
        STA &C21B
        JSR L82AA
        LDA &C317
-       JSR &B5C5	;; X=(A DIV 16)
+       JSR LB5C5	;; X=(A DIV 16)
        LDA &C1FC
        STA &C322,X
        LDA &FE44        ;; System VIA Latch Lo
@@ -3278,9 +3319,14 @@ ENDIF
        BPL L9203
        LDA #&02
        STA &C31C	;; Set Previous Directory to $
+IF USE65C12
+       STZ &C31D
+       STZ &C31E
+ELSE
        LDA #&00
        STA &C31D
        STA &C31E
+ENDIF
 .L921B LDY #&04
        LDA (&B6),Y	;; Check 'E' bit
        BMI L9224	;; Jump if 'E' set
@@ -3365,13 +3411,12 @@ ENDIF
 	STA &B5		;; &B4/5=>filename
 	RTS
 ENDIF
-;;
-;; On dispatch, (&B8)=>control block, (&B4)=>filename, A=function, Y=1, X=corrupted
-;; Subroutine should return A=filetype, XY=>control block
-;;
-;;
-;; OSFILE Dispatch Block
-;; =====================
+
+; On dispatch, (&B8)=>control block, (&B4)=>filename, A=function, Y=1, X=corrupted
+; Subroutine should return A=filetype, XY=>control block
+
+; OSFILE Dispatch Block
+; =====================
 .L9271 EQUW L8C10-1 ; &FF - LOAD
        EQUW L8F7F-1 ; &00 - SAVE
        EQUW L9085-1 ; &01 - Write Info
@@ -3465,7 +3510,11 @@ ENDIF
 .L9300 DEX              ;; Dec. padding needed
        BMI L9309        ;; All done
        JSR LA036        ;; Print a space
+IF USE65C12
+       BRA L9300        ;; Loop to print padding
+ELSE
        JMP L9300        ;; Loop to print padding
+ENDIF
 ;;
 .L9309 LDA #&28
        JSR LA03C        ;; Print '('
@@ -3489,54 +3538,56 @@ ENDIF
        PLA
 .L932B JSR L8462
        JMP LA03C
-;;
+
+; Print catalogue header
+; ======================
 .L9331 JSR LA714
-       LDA #&D9
+       LDA #&D9		; &B6/7=>&C8D9
        STA &B6
        LDA #&C8
        STA &B7
        LDX #&13
        JSR L928F
        JSR L92A8
-       EQUB &20, &A8
+       EQUB &20, &A8	; Print " ("
        LDA &C8FA
        JSR L9322
        JSR L92A8
        EQUS ")",&0D,"Drive",&BA
-       LDA &C317
+       LDA &C317	; Get current drive
        ASL A
        ROL A
        ROL A
        ROL A
-       ADC #&30
-       JSR LA03C
-       LDA #<L9A68
+       ADC #&30		; Convert to digit
+       JSR LA03C	; Display digit
+       LDA #<L9A68	; &B6/7=>L9A68, a zero byte
        STA &B6
        LDA #>L9A68
        STA &B7
-       LDX #&0D
-       JSR L928F
+       LDX #&0D		; 13 characters to print
+       JSR L928F	; Print 13 spaces as &B6/7=>&00
        JSR L92A8
        EQUS "Option", &A0
-       LDA &C1FD
-       JSR L9322
+       LDA &C1FD	; Get boot option
+       JSR L9322	; Print in hex
        JSR L92A8
-       EQUB &20, &A8
-       LDX &C1FD
-       LDA L9426,X
+       EQUB &20, &A8	; Print " ("
+       LDX &C1FD	; Get boot option
+       LDA L9426,X	; Get low byte of address of option string
        STA &B6
-       LDA #>L9426
-       STA &B7
-       LDX #&04
-       JSR L928F
+       LDA #>L9436	; Get high byte of address of option strings
+       STA &B7		; &B6/7=>option string
+       LDX #&04		; Four characters to print
+       JSR L928F	; Print the string at &B6/7
        JSR L92A8
        EQUS ")",&0D,"Dir.",&A0
-       LDA #&00		;; Point to &C300, directory name
+       LDA #&00		;; &B6/7=>&C300, directory name
        STA &B6
        LDA #&C3
        STA &B7
-       LDX #&0A
-       JSR L928F
+       LDX #&0A		; 10 characters to print
+       JSR L928F	; Print the string at &B6/7
        JSR L92A8
        EQUS "     Lib.",&A0
        LDA #&0A		;; Point to &C30A, library name
@@ -3558,7 +3609,7 @@ ENDIF
 ;; ============
 .L93D5 JSR LA50D
        JSR L9478
-.L93DB JSR L9331
+.L93DB JSR L9331	; Print catalogue header
        LDA #&04
        STA &C22B	; Display in four columns
 
@@ -3581,7 +3632,7 @@ IF USE65C12
 ELSE
 	JMP L93FF	; Step to next entry
 ENDIF
-;;
+
 .L93FC	JSR LA036	; Print a space without spooling
 .L93FF
 IF OPTIMISE<2
@@ -3608,17 +3659,20 @@ ENDIF
        JSR LA03C
 .L9420 JSR LA03A	;; Print final newline
 .L9423 JMP L89D8
-;;
+
 .L9426 EQUB <L942A, <L942E, <L9432, <L9436
 .L942A EQUS "Off "
 .L942E EQUS "Load"
 .L9432 EQUS "Run "
 .L9436 EQUS "Exec"
+IF (L942A AND &FF00)<>(L9436 AND &FF00)
+	ERROR "Option strings run over page boundary"
+ENDIF
 ;;
 ;; FSC 9 - *EX
 ;; =============
 .L943A	JSR L9478
-.L943D	JSR L9331
+.L943D	JSR L9331	; Print catalogue header
 .L9440
 IF USE65C12
 	LDA (&B6)	; Check first byte of directory entry
@@ -3638,8 +3692,11 @@ IF OPTIMISE<2
 	BRA L9440
 ELSE
 	JSR NextEntry	; Step to next entry
-	BNE L9446	; Not end of directory, loop back to print entry
-	BEQ L9423	; End of directory, finish
+IF USE65C12
+	BRA L9440	; Loop back
+ELSE
+	JMP L9440	; Loop back
+ENDIF
 ENDIF
 
 .L9456 LDY #&00		; Point to first character, prepare Y=0 for later
@@ -4083,10 +4140,17 @@ ENDIF
        STA &C21E
        JMP L82AE
 ;;
-.L97AE LDA #&00
+.L97AE
+IF USE65C12
+       STZ &C2AB
+       STZ &C2AC
+       STZ &C2AD
+ELSE
+       LDA #&00
        STA &C2AB
        STA &C2AC
        STA &C2AD
+ENDIF
 .L97B9 LDA #&FF
        STA &C2A2
        STA &C2A3
@@ -4147,8 +4211,11 @@ IF OPTIMISE<2
 	BCS L97C7
 ELSE
 	JSR NextEntry	; Step to next entry
-	BNE L97DC	; Not end of directory
-	BEQ L97CD	; End of directory
+IF USE65C12
+	BRA L97C7	; Loop back
+ELSE
+	JMP L97C7	; Loop back
+ENDIF
 ENDIF
 .L981E LDA &B4
        STA &B6
@@ -4301,12 +4368,14 @@ IF OPTIMISE<2
 	BRA L98E2
 ELSE
 	JSR NextEntry
-	BNE L98E8	; Not end of directory
-	BEQ L9913	; End of directory
+IF USE65C12
+	BRA L98E2	; Loop back
+ELSE
+	JMP L98E2	; Loop back
 ENDIF
-;;
+ENDIF
 .L993D JMP L89D8
-;;
+;
 .L9940 EQUS "^"		;; Path for *BACK
 .L9941 EQUB 13
 ;;
@@ -4460,7 +4529,11 @@ ENDIF
        STA &B5
        PLA
        STA &B4
+IF USE65C12
+       BRA L9A29
+ELSE
        JMP L9A29
+ENDIF
 ;;
 .L9A47 PLA
        PLA
@@ -4571,6 +4644,9 @@ ENDIF
        EQUB &0D
 .L9A9C EQUS "E.-ADFS-$.!BOOT"	;; *Exec option
        EQUB &0D
+IF (L9A92 AND &FF00)<>(L9A9C AND &FF00)
+	ERROR "Boot strings run over page boundary"
+ENDIF
 ;;
 ;;
 ;; SERVICE CALL HANDLERS
@@ -4820,7 +4896,7 @@ ENDIF
        LDX #&0F
        LDY #&FF
        JSR &FFF4        ;; Claim Vectors
-       JSR &BA57	;; Set a flag
+       JSR LBA57	;; Set a flag
        JSR LA767        ;; Check workspace checksum
        STZ &C208
        STZ &C20C
@@ -5174,7 +5250,11 @@ ENDIF
        LDA &CD
        INY
        STA (&F0),Y
+IF USE65C12
+       BRA L9DB4
+ELSE
        JMP L9DB4
+ENDIF
 ;;
 .L9DE3 CMP #&71
        BNE L9DBA
@@ -5237,9 +5317,9 @@ ENDIF
 .L9E5C LDA L9F2D,X
        BMI L9E22
        JSR L92A8
-       EQUB &20, &A0
+       EQUB &20, &A0	; Two spaces
        LDY #&09
-.L9E68 LDA L9F2D,X
+.L9E68 LDA L9F2D,X	; Get character from command table
        BMI L9E74
        JSR LA03C
        INX
@@ -5329,7 +5409,7 @@ ENDIF
 ;; FSC 3 - *command
 ;; ================
 .L9ED3 JSR L8328
-       LDA #&A2		;; *B8/9=>&C2B8
+       LDA #&A2		;; &B8/9=>&C2A2
        STA &B8
        LDA #&C2
        STA &B9
@@ -5371,7 +5451,7 @@ ENDIF
        BCC L9F21
        INC &B5
 .L9F21 JSR LA50D        ;; Skip spaces, etc.
-.L9F24 LDA L9F2D,X      ;; Get command address
+.L9F24 LDA L9F2D+0,X    ;; Get command address
        PHA              ;; Stack it
        LDA L9F2D+1,X
        PHA
@@ -5400,10 +5480,13 @@ ENDIF
        EQUS "RENAME",   >(LA541-1), <(LA541-1), &22
        EQUS "TITLE",    >(LA292-1), <(LA292-1), &70
        EQUS "",         >(LA3DB-1), <(LA3DB-1)
-;;
 
 ; The next set of strings must not straddle a page boundary because
 ; code indexes into it with the MSB constant. See code at L9283
+IF (P% AND &FF) > (256-&4B)
+	PRINT "***WARNING: Help string table runs over page boundary"
+	ORG (P% AND &FF00)+256
+ENDIF
 .L9FB1 EQUS "<List Spec>"
        EQUB &00
 .L9FBD EQUS "<Ob Spec>"
@@ -5418,18 +5501,16 @@ ENDIF
        EQUB &00
 .L9FF4 EQUS "<Title>"
 .L9FFB EQUB &00
-IF (P% AND &FF00) <> (L9FB1 AND &FF00)
-;  ERROR "Table runs over page boundary"
-ENDIF
 
-;; FSC 7 - Handle Request
-;; ======================
+
+; FSC 7 - Handle Request
+; ======================
 .L9FFC LDX #&30         ;; Lowest handle=&30
        LDY #&39         ;; Highest handle=&39
        RTS
-;;
-;; FSC 0 - *OPT
-;; ============
+;
+; FSC 0 - *OPT
+; ============
 .LA001 LDX &B4
        BEQ LA00F
        DEX
@@ -6264,8 +6345,8 @@ ENDIF
        STA &B8
        LDA #&C2
        STA &B9
-       JSR &8DFE
-       JSR &8E7A
+       JSR L8DFE
+       JSR L8E7A
        LDY #&03
 .LA689 LDA (&B6),Y
        ASL A
@@ -6736,7 +6817,11 @@ ENDIF
        STA &C366,Y
        LDA &03,X
        STA &C35C,Y
+IF USE65C12
+       BRA LA9D0
+ELSE
        JMP LA9D0
+ENDIF
 ;;
 .LAA16 LDX &C3
        LDY &CF
@@ -7475,8 +7560,13 @@ ENDIF
        INC &B9
        BCS LAE38
 
-.LAE68 LDA #&00
+.LAE68
+IF USE65C12
+       STZ &C2B5
+ELSE
+       LDA #&00
        STA &C2B5
+ENDIF
 .LAE6D LDA &C22F
        STA &C2BF
        LDX #&02
@@ -7722,7 +7812,11 @@ ENDIF
        INC &C202,X
        BNE LB087
        INC &C203,X
+IF USE65C12
+       BRA LB087
+ELSE
        JMP LB087
+ENDIF
 ;;
 .LB0BD LDX &CF
        LDA &C29A
@@ -8287,7 +8381,7 @@ ENDIF
        BEQ LB545
        LDX #<L8831	;; Point to control block
        LDY #>L8831
-       JSR &82AE
+       JSR L82AE
        BRA LB4E2
 ;;
 .LB560 LDA #&FF
@@ -8956,16 +9050,20 @@ IF FLOPPY
        LDA &C202,X
        TAX
        PLA
-       LDY #&FF
-       JSR LBFAB
-       STA &A4
-       STY &A5
-       TYA
-       SEC
-       SBC #&50
-       BMI LBACF
-       STA &A5
-       JSR LBD40
+IF OPTIMISE<5
+	LDY #&FF
+	JSR LBFAB
+	STA &A4
+	STY &A5
+	TYA
+	SEC
+	SBC #&50
+	BMI LBACF
+	STA &A5
+	JSR LBD40
+ELSE
+	JSR GetSideTrackSector
+ENDIF
 .LBACF LDA &0D5E
        STA &FE24	;; Drive control register
        ROR A
@@ -9025,12 +9123,12 @@ IF FLOPPY
 ;; Access Floppy Disk Controller
 ;; -----------------------------
 .LBB46 TSX
-       STX &C2E7        ;; Save stack pointer
+       STX &C2E7        ; Save stack pointer
        LDA #&10
        STA &C2E0
-       JSR LBB72
+       JSR LBB72	; Check and set up address, command, sector, track
        JSR LBDBA
-       BEQ LBB23
+       BEQ LBB23	; EQ, jump to restore and return disk result
 .LBB57 STA &C2E2
        TSX
        STX &C2E7
@@ -9041,7 +9139,7 @@ IF FLOPPY
        STZ &C2E0
        JSR LBB72
        JSR LBD6E
-       JMP LBFB7
+       JMP LBFB7	; Jump to restore and return disk result
 ;;
 .LBB72 STZ &C2E3
        LDY #&01         ;; Point to address
@@ -9076,20 +9174,20 @@ IF FLOPPY
        STA &C2E3	;; Store result in control block
        JMP LBFB7        ;; Jump to return with result=&67
 			;; (&C2E0 AND &20)=0 so result in &A0 will not be copied to &C2E3
-;;
-;; Read from floppy
-;; ----------------
+;
+; Read from floppy
+; ----------------
 .LBBB0 LDA #&80
        TSB &C2E0	;; Set 'reading'
-;;
-;; Write to floppy
-;; ---------------
-.LBBB5 JSR LBBDE
-       JSR LBBBE
-       JMP LBF0A
-;;
+;
+; Write to floppy
+; ---------------
+.LBBB5 JSR LBBDE	; Get disk settings from configuration
+       JSR LBBBE	; Set up NMIs
+       JMP LBF0A	; Jump to check sector and calculate track/sector
+;
 .LBBBE 
-       JSR LBC01
+       JSR LBC01	; Claim NMIs
        LDA &C2E8
        STA &0D5C
        STZ &A0		;; Clear error
@@ -9100,8 +9198,8 @@ IF FLOPPY
        STA &A1
        LDA &CD
        STA &0D5D
-       JSR LBC18	;; This might fiddle with stack
-       RTS		;; Don't optimise out to JMP
+       JSR LBC18	; Copy NMI code to NMI space
+       RTS		; Don't optimise out to JMP
 
 ; Set disk stepping speed from configuration
 ; ------------------------------------------
@@ -9145,8 +9243,8 @@ ELSE
 ENDIF
 .LBC00 RTS
 
-;; Claim NMI space
-;; ---------------
+; Claim NMI space
+; ---------------
 .LBC01
        LDA #&8F
        LDX #&0C
@@ -9554,7 +9652,11 @@ ENDIF
        STA &A6          ;; Store drive in &A6
        AND #&1F         ;; Lose drive bits
        BEQ LBF1A	;; If sector<&10000, continue
+IF OPTIMISE<2
        JMP LBF6F	;; If sector>&FFFF, jump to 'Sector out of range'
+ELSE
+       BNE LBF6F	;; If sector>&FFFF, jump to 'Sector out of range'
+ENDIF
 ;;
 .LBF1A BIT &A6          ;; Check drive
        BVC LBF24        ;; Drive 0,1,4,5 -> jump ahead
@@ -9616,8 +9718,8 @@ ENDIF
 .LBF6F LDA #&61		;; Floppy error &21 (Bad address)
 .LBF71 STA &A0
 
-;; Jump to abort and return floppy error
-;; -------------------------------------
+; Jump to abort and return floppy error
+; -------------------------------------
 .LBF73 BNE LBFB7	;; Jump to return error in &A0
 
 IF NOT(TRIM_REDUNDANT)
@@ -9641,13 +9743,17 @@ IF NOT(TRIM_REDUNDANT)
        BNE LBFB7	;; Jump to return error
 ENDIF
 
-;; Sector < &A00, convert to track+sector
-;; --------------------------------------
-.LBF8F LDY #&07
-       LDA (&B0),Y      ;; Get sector b8-b15
+; Sector < &A00, convert to track+sector
+; --------------------------------------
+.LBF8F
+IF NOT(TRIM_REDUNDANT)
+	LDY #&07	; A already holds (&B0),7 if coming from LBF5E
+	LDA (&B0),Y	; Get sector b8-b15
+ENDIF
        TAX              ;; Pass to X
        INY
        LDA (&B0),Y      ;; Get sector b0-b7
+.GetSideTrackSector
        LDY #&FF
        JSR LBFAB	;; Divide by 16
        STA &A4		;; A=sector
@@ -9658,14 +9764,14 @@ ENDIF
        BMI LBFB6        ;; Side 0, leave track as 0-79
        STA &A5          ;; Store track 0-79
        JMP LBD40        ;; Set side 1
-;;
-;; Divide by 16
-;; ============
-;; On entry: A=low byte
-;;           X=high byte
-;;           Y=&FF
-;; On exit:  Y=&XA DIV 16
-;;           A=&XA MOD 16
+;
+; Divide by 16
+; ============
+; On entry: A=low byte
+;           X=high byte
+;           Y=&FF
+; On exit:  Y=&XA DIV 16
+;           A=&XA MOD 16
 .LBFAB SEC
        SBC #&10
        INY
@@ -9674,9 +9780,9 @@ ENDIF
        BPL LBFAB
        ADC #&10
 .LBFB6 RTS
-;;
-;; Return result from &A0 (or from &C2E3 if hardware not accessed)
-;; ---------------------------------------------------------------
+
+; Return result from &A0 (or from &C2E3 if hardware not accessed)
+; ---------------------------------------------------------------
 .LBFB7 LDX &C2E7
        TXS              ;; Reset stack
        LDA &C2E0

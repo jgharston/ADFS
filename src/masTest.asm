@@ -1,11 +1,11 @@
-; Build file for Master ADFS with User Port MMC drivers
-; -----------------------------------------------------
+; Build file for Test Build - Master ADFS IDE drivers with MMC optimisation
+; -------------------------------------------------------------------------
 
 TARGETOS=3		; 3=Master
 FLOPPY=TRUE		; Floppy drivers
 HD_SCSI=FALSE
-HD_IDE=FALSE
-HD_MMC=TRUE		; MMC drivers
+HD_IDE=TRUE		; IDE drivers
+HD_MMC=FALSE
 ;
 OPTIMISE=3		; How hard to optimise
 FULL_INFO=TRUE		; Full *INFO
