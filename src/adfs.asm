@@ -10,25 +10,26 @@
 ; build:
 ; ADFS Master SCSI v1.50r9
 ; ADFS Master IDE  v1.53r21
-; ADFS Master MMC  needs about 130 bytes more optimisation to fit into 16K
+; ADFS Master MMC
 
 
 ; OPTIMISE flag sets how hard to optimise
 ; 1 Use 65C12 coding where possible
-; 2 Subroutines for ReadCMOS, DiskSpeed, SetAttr, GetFilename, NextEntry
+; 2 Subroutines for ReadCMOS, DiskSpeed, SetAttr, GetFilename, NextEntry, PointToCtrl
 ; 3 Rewritten disk error generation
 ; 4 Crunch OSARGS, BGET/BPUT update, CheckOpen
-; 5 Crunch converting sector_address to side/track/sector
+; 5 Tail optimise sector_address to side/track/sector, LoadFSM, RootSector
+; 6 Merge *CAT/*EX, loop some code, crunch BGET return, SetDriveCommand, CheckAddr, SectToCtrl
 
 ; Testing
 ;  TRIM_REDUNDANT works.
 ;  OPTIMISE=1 works (use 65c12 ops)
 ;  OPTIMISE=2 works (subroutines for major chunks)
 ;  OPTIMISE=3 works (rewritten disk error routine)
-;  OPTIMISE=4 fails:
-;   *DUMP !Boot gives File Open
-;  OPTIMISE=5 untested
-;
+;  OPTIMISE=4 works (crunched OSARGS, BGET/BPUT, CheckOpen)
+;  OPTIMISE=5 works (tail optimised sector_addr conversion, LoadFSM, RootSector)
+;  OPTIMISE=6 testing, appears to work
+
 
 ; Sanity check
 ; ------------
@@ -187,7 +188,7 @@ IF HD_IDE
 .L806F PHP
 .L8070 LDA &FC47        ;; Get IDE status
        STA &CC          ;; Save this value
-       LDA &FC47        ;; Get ISE status
+       LDA &FC47        ;; Get IDE status
        CMP &CC          ;; Compare with previous status
        BNE L8070        ;; Loop until status stays same
        PLP
@@ -779,7 +780,7 @@ IF HD_SCSI
 .L8233 NOP              ;; 3xNOP delay for Tube I/O
        NOP
        NOP
-       LDA TUBEIO        ;; Read from Tube
+       LDA TUBEIO       ;; Read from Tube
        STA &FC40        ;; Write to SCSI data
        INY
        BNE L8233
@@ -1714,47 +1715,62 @@ ENDIF
 .L880C JSR LA50D
        JSR L93CC
        JSR LA714
-.L8815 LDY #&00
-       LDA (&B6),Y
-       BEQ L882E
-       JSR L8756
+.L8815
+IF USE65C12
+	LDA (&B6)	; Get first byte of directory entry
+ELSE
+	LDY #&00
+	LDA (&B6),Y	; Get first byte of directory entry
+ENDIF
+       BEQ L882E	; End of directory
+       JSR L8756	; Check entry is valid
        BEQ L8830
        BCC L8830
-       LDA &B6
-       ADC #&19
-       STA &B6
-       BCC L8815
-       INC &B7
-       BNE L8815
+IF OPTIMISE<2
+	LDA &B6		; Step to next entry
+	ADC #&19	; &B6/7=&B6/7+26 (25+Cy)
+	STA &B6
+	BCC L8815
+	INC &B7
+	BNE L8815
+ELSE
+	JSR NextEntry
+IF USE65C12
+	BRA L8815
+ELSE
+	JMP L8815
+ENDIF
+ENDIF
 .L882E CMP #&0F
 .L8830 RTS
 
-;;
-;; Control block to load FSM
-.L8831 EQUB &01
-       EQUB &00
+; Control block to load FSM
+; -------------------------
+.L8831 EQUB &01		; Result=&01, Dick not formatted
+       EQUB &00		; Load to &FFFFC000
        EQUB &C0
        EQUB &FF
        EQUB &FF
-       EQUB &08
+       EQUB &08		; Action=Read
+       EQUB &00		; Sector=&000000
        EQUB &00
        EQUB &00
-       EQUB &00
-       EQUB &02
-.L883B EQUB &00
-;;
-;; Control block to load '$'
-.L883C EQUB &01
-       EQUB &00
+       EQUB &02		; Number=2
+.L883B EQUB &00		; &00=use sector count
+
+; Control block to load '$'
+; -------------------------
+.L883C EQUB &01		; Result=&01, Disk not formatted
+       EQUB &00		; Load to &FFFFC400
        EQUB &C4
        EQUB &FF
        EQUB &FF
-       EQUB &08
-       EQUB &00
+       EQUB &08		; Action=Read
+       EQUB &00		; Sector=&000002
        EQUB &00
        EQUB &02
-       EQUB &05
-       EQUB &00
+       EQUB &05		; Number=5
+       EQUB &00		; &00=use sector count
 ;;
 ;; Check drive character
 .L8847 CMP #&30
@@ -1816,9 +1832,13 @@ ENDIF
 .L88AA STA &C317        ;; Store in current drive
 .L88AD LDA #&10
        TSB &CD          ;; Set 'FSM inconsistant' flag
-       LDX #<L8831      ;; Point to 'load FSM' control block
-       LDY #>L8831
-       JSR L82AE	  ;; Load FSM
+IF OPTIMISE<5
+	LDX #<L8831	; Point to 'load FSM' control block
+	LDY #>L8831
+	JSR L82AE	; Load FSM
+ELSE
+	JSR LoadFSM
+ENDIF
        LDA #&10
        TRB &CD            ;; Clear 'FSM inconsistant' flag
        LDA &C22E
@@ -1972,11 +1992,16 @@ ENDIF
        STA &C22C,Y
        DEY
        BPL L89AB
-.L89B4 LDX #&0A
-.L89B6 LDA L883C,X	; Get byte from 'load $' control block
-       STA &C215,X	; Store into workspace control block
-       DEX
-       BPL L89B6
+.L89B4
+IF OPTIMISE<5
+	LDX #&0A
+.L89B6	LDA L883C,X	; Get byte from 'load $' control block
+	STA &C215,X	; Store into workspace control block
+	DEX
+	BPL L89B6
+ELSE
+	JSR RootSector
+ENDIF
        LDX #&02
        LDY #&16		; Point to object's SECT entry
 .L89C3 LDA (&B6),Y	; Copy object's SECT entry to workspace
@@ -1988,6 +2013,17 @@ ENDIF
        JSR L82AA	; Do disk access, load the directory
        JMP L88FD	; Jump to parse next path component
 
+IF OPTIMISE>=5
+.RootSector
+	LDX #&0A
+.RootSecLp
+	LDA L883C,X	; Get byte from 'load $' control block
+	STA &C215,X	; Store into workspace control block
+	DEX
+	BPL RootSecLp
+	RTS
+ENDIF
+
 .L89D5 LDA &C2C0
 .L89D8 PHA
        LDA &C22F
@@ -1996,21 +2032,32 @@ ENDIF
        STA &C317
        LDA #&FF
        STA &C22F
-       LDX #<L8831      ;; Point to 'load FSM' control block
-       LDY #>L8831
-       JSR L82AE	;; Load FSM
+IF OPTIMISE<5
+	LDX #<L8831	; Point to 'load FSM' control block
+	LDY #>L8831
+	JSR L82AE	; Load FSM
+ELSE
+	JSR LoadFSM
+ENDIF
 .L89EF LDA &C22E
        CMP #&FF
        BEQ L8A22
-       TAX
-       LDY #&0A
-.L89F9 LDA L883C,Y      ;; Copy parameter block to
-       STA &C215,Y      ;; load '$'
-       DEY
-       BPL L89F9
-       STX &C316        ; Copy parameters to &C215
-       STX &C21B	; Modify control block to be
-       LDA &C22D	; 'load directory' control block
+IF OPTIMISE<5
+	TAX
+	LDY #&0A
+.L89F9	LDA L883C,Y	; Copy parameter block to load '$'
+	STA &C215,Y	; Copy parameters to &C215
+	DEY
+	BPL L89F9
+	STX &C316	; Modify control block to be
+	STX &C21B	; 'load directory' control block
+ELSE
+	TAY
+	JSR RootSector	; Copy parameters to &C215
+	STY &C316	; Modify control block to be
+	STY &C21B	; 'load directory' control block
+ENDIF
+       LDA &C22D
        STA &C315
        STA &C21C
        LDA &C22C
@@ -2047,7 +2094,7 @@ ENDIF
 ;; C600-FF Directory buffer
 ;; C700-FF Directory buffer
 ;; C800-FF Directory buffer
-;; C900-FF Random access buffer 1
+;; C900-FF Random access buffer 1 - also *CDIR buffer
 ;; CA00-FF Random access buffer 2
 ;; CB00-FF Random access buffer 3
 ;; CC00-FF Random access buffer 4
@@ -2605,11 +2652,29 @@ ENDIF
        EQUB &C3         ;; ERR=195
        EQUS "Locked"
        EQUB &00
-;;
-;; Check if file open, can't overwrite an open file
-;; ------------------------------------------------
-.L8D2C LDX #&09
-.L8D2E LDA &C3AC,X
+
+
+; Check if file open, can't change an open file
+; ---------------------------------------------
+; CheckOpenAll - Checks channel flags b0-b7
+; CheckOpen    - Check channel flags by ANDing with A
+; Generates an error if an open channel matches object
+; Returns X=0, EQ if no open channels matches object
+;
+.L8D2C
+.CheckOpenAll
+IF OPTIMISE>=4
+	LDA #&FF	; Check b7-b0 of &C3AC,X
+ENDIF
+.CheckOpen
+	LDX #&09	; 9+1 channels to check
+.L8D2E
+IF OPTIMISE<4
+	LDA &C3AC,X	; Check if channel flags are &00
+ELSE
+	PHA		; Save check mask
+	AND &C3AC,X	; Mask with channel flags
+ENDIF
        BEQ L8D74
        LDA &C3B6,X
        AND #&E0
@@ -2632,11 +2697,15 @@ ENDIF
        EQUB &C2		; ERR=194
        EQUS "Can't - File open"
        EQUB &00
-.L8D74 DEX
-       BPL L8D2E
-       INX
-       RTS
-;;
+.L8D74
+IF OPTIMISE>=4
+	PLA		; Get check mask back
+ENDIF
+	DEX
+	BPL L8D2E	; Loop through all channels
+	INX		; Return with X=&00, EQ
+	RTS
+
 .L8D79 LDY #&00
        JSR L8743
        BNE L8D85
@@ -2941,19 +3010,27 @@ ENDIF
 ;;
 .L8F91 JSR LA714
        JSR L9012
-       LDX #&0A
-.L8F99 LDA L883C,X	; Copy control block to load '$'
-       STA &C215,X
-       DEX
-       BPL L8F99
-       LDA #&0A
-       STA &C21A	; Change to 'Write'
-       LDA &C314	; Change sector to new dir to create
-       STA &C21D
-       LDA &C315
-       STA &C21C
-       LDA &C316
-       STA &C21B
+IF OPTIMISE<5
+	LDX #&0A
+.L8F99	LDA L883C,X	; Copy control block to load '$'
+	STA &C215,X
+	DEX
+	BPL L8F99
+ELSE
+	JSR RootSector
+ENDIF
+	LDA #&0A	; Change action to 'Write'
+IF OPTIMISE<6
+	STA &C21A	; Update action
+	LDA &C314	; Change sector to new dir to create
+	STA &C21D
+	LDA &C315
+	STA &C21C
+	LDA &C316
+	STA &C21B
+ELSE
+	JSR SectorToControl
+ENDIF
        JSR L82AA
        LDA &C317
        JSR LB5C5	;; X=(A DIV 16)
@@ -2972,7 +3049,19 @@ ENDIF
        TRB &CD          ;; Set 'FSM loaded' flag
        LDA #&00
        RTS
-;;
+
+IF OPTIMISE>=6
+.SectorToControl
+	STA &C21A	; Update action
+	LDA &C314	; Change sector to new dir to create
+	STA &C21D
+	LDA &C315
+	STA &C21C
+	LDA &C316
+	STA &C21B
+	RTS
+ENDIF
+
 .L8FE8 JSR L8870
        PHP
        PHA              ;; Save registers
@@ -3069,17 +3158,17 @@ ENDIF
        RTS
 ;;
 ;; Control block to save FSM
-.L907A EQUB &01
-       EQUB &00
+.L907A EQUB &01		; Result=&01, Disk not formatted
+       EQUB &00		; Save from &FFFFC000
        EQUB &C0
        EQUB &FF
        EQUB &FF
-       EQUB &0A
+       EQUB &0A		; Action=Write
+       EQUB &00		; Sector=&000000
        EQUB &00
        EQUB &00
-       EQUB &00
-       EQUB &02
-       EQUB &00
+       EQUB &02		; Number=&02
+       EQUB &00		; &00=use sector count
 ;;
 ;; OSFILE &01-&03 - Write Info
 ;; ===========================
@@ -3211,7 +3300,7 @@ IF NOT(TRIM_REDUNDANT) OR TARGETOS<3
        STA &C240
        LDA &B5
        STA &C241
-       LDA #&40		;; &B8/9=&C240, workspace control block
+       LDA #&40		;; &B8/9=>&C240, workspace control block
        STA &B8
        LDA #&C2
        STA &B9		;; Fall through into Delete
@@ -3528,7 +3617,9 @@ ENDIF
 ;; Access characters
 ;; =================
 .L931D EQUS "RWLDE"
-;;
+
+; Print hex
+; =========
 .L9322 PHA
        LSR A
        LSR A
@@ -3671,6 +3762,11 @@ ENDIF
 ;;
 ;; FSC 9 - *EX
 ;; =============
+IF OPTIMISE>=6
+.CatOrEx
+	BEQ L93DB	; = &00 -> do CAT
+	BNE L943D	; <>&00 -> do EX
+ENDIF
 .L943A	JSR L9478
 .L943D	JSR L9331	; Print catalogue header
 .L9440
@@ -3684,7 +3780,7 @@ ENDIF
 .L9446	JSR L9508	; Print info for this entry
 IF OPTIMISE<2
 	CLC		; Step to next entry
-	LDA &B6		; &B6/7=*B6/7+26
+	LDA &B6		; &B6/7=&B6/7+26
 	ADC #&1A
 	STA &B6
 	BCC L9440
@@ -3744,11 +3840,16 @@ ENDIF
        STA &C22C,Y
        DEY
        BPL L94A6
-.L94AF LDX #&0A
-.L94B1 LDA L883C,X
-       STA &C215,X
-       DEX
-       BPL L94B1
+.L94AF 
+IF OPTIMISE<5
+	LDX #&0A
+.L94B1	LDA L883C,X
+	STA &C215,X
+	DEX
+	BPL L94B1
+ELSE
+	JSR RootSector
+ENDIF
        LDX #&02
        LDY #&16
 .L94BE LDA (&B6),Y
@@ -3885,7 +3986,7 @@ ENDIF
        LDY #&00
        JSR LA97A
        LDX #&0F
-.L9580 LDA L9639,X
+.L9580 LDA L9639,X	; Copy an OSFILE control block to workspace
        STA &C242,X
        DEX
        BPL L9580
@@ -3893,10 +3994,14 @@ ENDIF
        STA &C240
        LDA &B5
        STA &C241
-       LDA #&40		;; &B8/9=&C240
-       STA &B8
-       LDA #&C2
-       STA &B9
+IF OPTIMISE<2
+	LDA #&40	; &B8/9=>&C240
+	STA &B8
+	LDA #&C2
+	STA &B9
+ELSE
+	JSR PointToCtrl	; &B8/9=>&C240, control block in workspace
+ENDIF
        JSR L8DFE
        LDY #&09
        LDA &C237
@@ -3907,7 +4012,15 @@ ENDIF
        EQUB &C4         ;; ERR=196
        EQUS "Already exists"
        EQUB &00
-;;
+
+IF OPTIMISE>=2
+.PointToCtrl
+	LDA #&40	; Point &B8/9=>&C240, control block in workspace
+	STA &B8
+	LDA #&C2
+	STA &B9
+	RTS
+ENDIF
 
 .L95BE LDA (&B4),Y	;; Get filename character
        AND #&7F
@@ -3943,15 +4056,15 @@ ENDIF
 	LDA #&00
 	TAX
 	TAY
-.L95EC STA &CA00,X
-       STA &C900,X
+.L95EC STA &CA00,X	; Use random access buffers to create a new directory
+       STA &C900,X	; Blank out the directory
        STA &CB00,X
        STA &CC00,X
        STA &CD00,X
        INX
        BNE L95EC
        LDX #&04
-.L9600 LDA L84DC,X
+.L9600 LDA L84DC,X	; Copy 'Hugo' string into directory
        STA &C900,X
        STA &CDFA,X
        LDA &C314,X
@@ -3959,7 +4072,7 @@ ENDIF
        DEX
        BPL L9600
        LDX #&00
-.L9614 LDA (&B4),Y
+.L9614 LDA (&B4),Y	; Copy directory name into new directory
        AND #&7F
        CMP #&22
        BEQ L9620
@@ -3974,22 +4087,26 @@ ENDIF
        BNE L9614
        LDA #&0D
        STA &CDD9,X
-       JSR L8A42
-       JMP L8F8B
-;;
-.L9639 EQUB &00
+       JSR L8A42	; Save the parent directory
+       JMP L8F8B	; Create the new directory
+
+; Control block to create a directory
+; -----------------------------------
+; Saves block of memory, then munges access bit to make it into a directory
+;
+.L9639 EQUB &00		; Load=&00000000
        EQUB &00
        EQUB &00
        EQUB &00
+       EQUB &00		; Exec=&00000000
        EQUB &00
        EQUB &00
        EQUB &00
-       EQUB &00
-       EQUB &00
+       EQUB &00		; Start=&FFFFC900
        EQUB &C9
        EQUB &FF
        EQUB &FF
-       EQUB &00
+       EQUB &00		; End=&FFFFCE00
        EQUB &CE
        EQUB &FF
        EQUB &FF
@@ -4126,20 +4243,24 @@ ENDIF
        BEQ L978A	;; If clear, do something
        RTS
 ;;
-.L978A LDA #&C4
-       STA &C217
-       LDA #&08
-       STA &C21A
-       LDA &C314
-       STA &C21D
-       LDA &C315
-       STA &C21C
-       LDA &C316
-       STA &C21B
-       LDA #&05
-       STA &C21E
-       JMP L82AE
-;;
+.L978A	LDA #&C4
+	STA &C217
+	LDA #&08	; Change action to 'Read'
+IF OPTIMISE<6
+	STA &C21A
+	LDA &C314
+	STA &C21D
+	LDA &C315
+	STA &C21C
+	LDA &C316
+	STA &C21B
+ELSE
+	JSR SectorToControl
+ENDIF
+	LDA #&05
+	STA &C21E
+	JMP L82AE
+
 .L97AE
 IF USE65C12
        STZ &C2AB
@@ -4360,7 +4481,7 @@ ENDIF
 .L9930
 IF OPTIMISE<2
 	CLC		; Step to next entry
-	LDA &B6		; &B6/7=*B6/7+26
+	LDA &B6		; &B6/7=&B6/7+26
 	ADC #&1A
 	STA &B6
 	BCC L98E2
@@ -4400,10 +4521,15 @@ ENDIF
        DEY
        LDA (&B6),Y      ;; Get 'D' bit
        AND #&80
+IF USE65C12
+       ORA (&B6)	; Copy 'D' bit into 'R' bit
+       STA (&B6)	; Forces dirs to always have 'R'
+ELSE
        LDY #&00
-       ORA (&B6),Y      ;; Copy 'D' bit into 'R' bit
-       STA (&B6),Y      ;; Forces dirs to always have 'R'
-;;
+       ORA (&B6),Y	; Copy 'D' bit into 'R' bit
+       STA (&B6),Y	; Forces dirs to always have 'R'
+ENDIF
+
 .L996A STA &C22B        ;; Store 'E' or 'D'+'R' bit
        LDY #&00         ;; Step past filename
 .L996F LDA (&B4),Y	;; Get filename character
@@ -4490,25 +4616,32 @@ ENDIF
        PHA
        LDA &B5
        PHA
-       LDA #&40		;; &B8/9=&C240
-       STA &B8
-       LDA #&C2
-       STA &B9
+IF OPTIMISE<2
+	LDA #&40	; &B8/9=>&C240
+	STA &B8
+	LDA #&C2
+	STA &B9
+ELSE
+	JSR PointToCtrl	; &B8/9=>&C240
+ENDIF
        JSR L94EE
        PLA
        STA &B5
        PLA
        STA &B4
        JSR L92A8
-;;     EQUS "Destroy? ", &A0
-       EQUS "Destroy ?", &A0
+IF OPTIMISE<1
+	EQUS "Destroy ?", &A0
+ELSE
+	EQUS "Destroy?", &A0
+ENDIF
        LDX #&03
 .L9A0F JSR &FFE0
        CMP #&20
        BCC L9A19
        JSR LA03C
-.L9A19 AND #&DF
-       CMP L84D8,X
+.L9A19 AND #&DF		; Force to upper case
+       CMP L84D8,X	; Compare with 'YES'
        BNE L99DA
        DEX
        BPL L9A0F
@@ -4659,16 +4792,16 @@ ENDIF
 ;;
 ;; Low service call routines address-1 low bytes
 ;; ---------------------------------------------
-.L9AAC EQUB <(L9AD5-1)                   ;; Serv0 - L9AD5 - Null
-       EQUB <(L9AD5-1)                   ;; Serv1 - L9AD5 - Null
-       EQUB <(L9AFF-1)                   ;; Serv2 - L9AFF - Low w/s
-       EQUB <(L9B54-1)                   ;; Serv3 - L9B54 - Boot FS
-       EQUB <(L9D23-1)                   ;; Serv4 - L9D23 - Commands
-       EQUB <(LAB89-1)                   ;; Serv5 - LAB89 - Interrupt
-       EQUB <(L9AD5-1)                   ;; Serv6 - L9AD5 - Null
-       EQUB <(L9AD5-1)                   ;; Serv7 - L9AD5 - Null
-       EQUB <(L9D5E-1)                   ;; Serv8 - L9D5E - Osword
-       EQUB <(L9E0D-1)                   ;; Serv9 - L9E0D - Help
+.L9AAC EQUB <(L9AD5-1)		; Serv0 - L9AD5 - Null
+       EQUB <(L9AD5-1)		; Serv1 - L9AD5 - Null
+       EQUB <(L9AFF-1)		; Serv2 - L9AFF - Low w/s
+       EQUB <(L9B54-1)		; Serv3 - L9B54 - Boot FS
+       EQUB <(L9D23-1)		; Serv4 - L9D23 - Commands
+       EQUB <(LAB89-1)		; Serv5 - LAB89 - Interrupt
+       EQUB <(L9AD5-1)		; Serv6 - L9AD5 - Null
+       EQUB <(L9AD5-1)		; Serv7 - L9AD5 - Null
+       EQUB <(L9D5E-1)		; Serv8 - L9D5E - Osword
+       EQUB <(L9E0D-1)		; Serv9 - L9E0D - Help
 ;;
 ;; Low service call routines address-1 high bytes
 ;; ----------------------------------------------
@@ -4685,13 +4818,13 @@ ENDIF
 ;;
 ;; High service call routines address-1 low bytes
 ;; ----------------------------------------------
-.L9AC0 EQUB <(L9CD9-1)                   ;; Serv21 - L9CD9 - High abs
-       EQUB <(L9CE0-1)                   ;; Serv22 - L9CE0 - High w/s
-       EQUB <(L9AD5-1)                   ;; Serv23 - L9AD5 - Null
-       EQUB <(L9CE8-1)                   ;; Serv24 - L9CE8 - Hazel count
-       EQUB <(L9CEA-1)                   ;; Serv25 - L9CEA - FS Info
-       EQUB <(L9D05-1)                   ;; Serv26 - L9D05 - *SHUT
-       EQUB <(L9AD5-1)                   ;; Serv27 - L9AD5 - Null
+.L9AC0 EQUB <(L9CD9-1)		; Serv21 - L9CD9 - High abs
+       EQUB <(L9CE0-1)		; Serv22 - L9CE0 - High w/s
+       EQUB <(L9AD5-1)		; Serv23 - L9AD5 - Null
+       EQUB <(L9CE8-1)		; Serv24 - L9CE8 - Hazel count
+       EQUB <(L9CEA-1)		; Serv25 - L9CEA - FS Info
+       EQUB <(L9D05-1)		; Serv26 - L9D05 - *SHUT
+       EQUB <(L9AD5-1)		; Serv27 - L9AD5 - Null
 ;;
 ;; High service call routines address-1 high bytes
 ;; -----------------------------------------------
@@ -4739,9 +4872,9 @@ ENDIF
        CMP #&28
        BCS L9AD5        ;; Quit with calls >&27
        TAX              ;; Pass service call into X
-       LDA L9AC7-&21,X   ;; Index into address table
+       LDA L9AC7-&21,X  ;; Index into address table
        PHA              ;; Push service routine address
-       LDA L9AC0-&21,X   ;; onto stack
+       LDA L9AC0-&21,X  ;; onto stack
        BRA L9AE8        ;; Jump back to jump to service routine
 ;;
 ;;
@@ -4945,10 +5078,11 @@ IF PRESERVE_CONTEXT
        LDA &CD          ;; If HD, look for $.Library
        AND #32
        BEQ L9C7A
-       BNE L9C41
 IF NOT(TRIM_REDUNDANT)
-       EQUB &1B		;; leftover bytes
+       BNE L9C41	; Will fall through
+       EQUB &1B		; leftover bytes
        EQUB &C3
+       BNE L9C7A        ; leftover bytes
 ENDIF
 ELSE
        LDA &C318        ;; Is LIB set to ":0.$"?
@@ -4957,24 +5091,23 @@ ELSE
        LDA &C319
        ORA &C31A
        ORA &C31B
-ENDIF
        BNE L9C7A        ;; No, don't look for Library
+ENDIF
 .L9C41 LDA #<L9CAE
        STA &B4
        LDA #>L9CAE
-       STA &B5          ;; Point to ":0.LIB*"
-       JSR L8FE8
-       BNE L9C7A
-.L9C4E
-       LDY #&03
-       LDA (&B6),Y	;; Check 'D' bit
-       BMI L9C5B
-       JSR L8964
-       BNE L9C7A
-       BEQ L9C4E
+       STA &B5          ; Point to ":0.LIB*"
+       JSR L8FE8	; Search for it
+       BNE L9C7A	; Not found, skip
+.L9C4E LDY #&03
+       LDA (&B6),Y	; Check 'D' bit
+       BMI L9C5B	; Directory, set LIB to it
+       JSR L8964	; Step to next entry
+       BNE L9C7A	; No more 'LIB*' entries, skip
+       BEQ L9C4E	; Loop back to see if this is a directory
 .L9C5B LDX #&02
        LDY #&18
-.L9C5F LDA (&B6),Y
+.L9C5F LDA (&B6),Y	; Copy this entry's SECT to LIB
        STA &C318,X
        DEY
        DEX
@@ -4982,7 +5115,7 @@ ENDIF
        LDA &C317
        STA &C31B
        LDY #&09
-.L9C70 LDA (&B6),Y
+.L9C70 LDA (&B6),Y	; Copy directory's name to LIBNAME
        AND #&7F
        STA &C30A,Y
        DEY
@@ -5160,12 +5293,12 @@ ENDIF
        BEQ L9D76        ;; Yes, jump to continue
        JSR L9B4A        ;; Select ADFS if ADFS not selected
 .L9D76 LDA &EF          ;; Get OSWORD number
-       CMP #&72         ;; Is if &72?
+       CMP #&72         ;; Is it &72?
        BNE L9DC0        ;; No, jump ahead
 ;;
 ;;
-;; OSWORD &72 - SCSI Device Access (Sector Read/Write)
-;; ===================================================
+;; OSWORD &72 - SCSI API for Device Access (Sector Read/Write/Etc)
+;; ===============================================================
        LDA &F0          ;; Copy block pointer to &BA/B
        STA &BA
        LDA &F1
@@ -5221,19 +5354,34 @@ ELSE
 	LDY #&00	; Point to result byte
 	STA (&BA),Y	; Store result in control block
 ENDIF
-.L9DB4 LDX &F4          ;; Restore ROM number in X
-       PLY              ;; Restore Y
-       LDA #&00         ;; A=0 to claim OSWORD
-       RTS
-;;
-;; Exit from OSWORD service call
-;; -----------------------------
-.L9DBA LDX &F4          ;; Put ROM number in X
-       PLY              ;; Restore Y
-       LDA #&08         ;; A=8 to exit with OSWORD unclaimed
-       RTS
-;;
-;;
+IF OPTIMISE<2
+; Claim OSWORD service call
+; -------------------------
+.L9DB4	LDX &F4		; Restore ROM number to X
+	PLY		; Restore Y
+	LDA #&00	; A=0 to claim OSWORD
+	RTS
+
+; Exit from OSWORD service call
+; -----------------------------
+.L9DBA	LDX &F4		; Restore ROM number to X
+	PLY		; Restore Y
+	LDA #&08	; A=8 to exit with OSWORD unclaimed
+	RTS
+ELSE
+; Claim OSWORD service call
+; -------------------------
+.L9DB4	LDA #&00	; A=0 to claim OSWORD
+	BEQ L9DBC
+
+; Exit from OSWORD service call
+; -----------------------------
+.L9DBA	LDA #&08	; A=8 to exit with OSWORD unclaimed
+.L9DBC	LDX &F4		; Restore ROM number to X
+	PLY		; Restore Y
+	RTS
+ENDIF
+
 .L9DC0 CMP #&73
        BNE L9DD0
        LDY #&04
@@ -5468,8 +5616,8 @@ ENDIF
        EQUS "DIR",      >(L9546-1), <(L9546-1), &20
        EQUS "DISMOUNT", >(LA151-1), <(LA151-1), &40
        EQUS "FREE",     >(LA063-1), <(LA063-1), &00
-       EQUS "LCAT",     >(LA4BD-1), <(LA4BD-1), &00
-       EQUS "LEX",      >(LA4C9-1), <(LA4C9-1), &00
+.cmdLC EQUS "LCAT",     >(LA4BD-1), <(LA4BD-1), &00
+.cmdLE EQUS "LEX",      >(LA4C9-1), <(LA4C9-1), &00
        EQUS "LIB",      >(LA482-1), <(LA482-1), &30
        EQUS "MAP",      >(LA092-1), <(LA092-1), &00
 IF PRESERVE_CONTEXT
@@ -5536,28 +5684,33 @@ ENDIF
        EQUB &CB         ;; ERR=203
        EQUS "Bad opt"
        EQUB &00
-;;
-.LA036 LDA #&20
+
+; Print a character with non-ADFS SPOOLing disabled
+; -------------------------------------------------
+; Prevents another filing system swapping in in the middle of doing ADFS text output
+;
+.LA036 LDA #&20		; Print a space
        BRA LA03C
-.LA03A LDA #&0D
-.LA03C PHX
+.LA03A LDA #&0D		; Print a newline
+.LA03C PHX		; Print a character
        PHY
        PHA
        LDA #&C7
-       LDY #&00
-       JSR L84C6
+       LDY #&00		; Do OSBYTE &C7,0,0
+       JSR L84C6	; Set SPOOL handle to 0, returning X=SPOOL, Y=Escape/Break flags
        CPX #&30
-       BCC LA053
+       BCC LA053	; Not an ADFS handle
        CPX #&3A
-       BCS LA053
-       JSR &FFF4
-       LDX #&00
+       BCS LA053	; Not an ADFS handle
+			; This looks like we need a LDY #0 here as if *FX200,<>0, Y will be <>0
+       JSR &FFF4	; Restore SPOOL handle, we can safely SPOOL to ourself
+       LDX #&00		; Don't need to restore again
 .LA053 PLA
        PHA
-       JSR &FFE3
+       JSR &FFE3	; Write the character without SPOOLing
        LDA #&C7
-       LDY #&FF
-       JSR &FFF4
+       LDY #&FF		; Preserve handle if already restored
+       JSR &FFF4	; Restore SPOOL handle with OSBYTE &C7,handle or &00,&FF
        PLA
        PLY
        PLX
@@ -5652,17 +5805,17 @@ ELSE
 ENDIF
 ;;
 IF NOT(HD_MMC)
-.LA12A EQUB &00
-       EQUB &00         ;; ;; &FFFFC900
+.LA12A EQUB &00		; Result=&00, Ok
+       EQUB &00		; Address=&FFFFC900, dummy address
        EQUB &C9
        EQUB &FF
        EQUB &FF
-       EQUB &1B         ;; ;; Command &1B
-       EQUB &00         ;; ;; Drive 0, Sector 0
+       EQUB &1B		; Action=Park
+       EQUB &00		; Sector=&000000
        EQUB &00
        EQUB &00
-       EQUB &00         ;; ;; Zero sector
-       EQUB &00
+       EQUB &00		; &00=Park
+       EQUB &00		; &00=use sector count
 ENDIF
 ;;
 .LA135 JSR LA50D
@@ -5722,9 +5875,9 @@ ENDIF
 .LA1A1 LDA &C26F        ;; Get drive
        STA &C317        ;; Set current drive
 IF NOT(HD_MMC)
-       LDX #<LA1DF	;; Point to 'park' control block
+       LDX #<LA1DF	;; Point to 'unpark' control block
        LDY #>LA1DF
-       JSR L80A2        ;; Do SCSI command &1B - Park
+       JSR L80A2        ;; Do SCSI command &1B - UnPark
 ENDIF
        LDA #<(LA2EA)	;; B4/5=>&00 - null string
        STA &B4
@@ -5748,17 +5901,17 @@ ENDIF
 .LA1DE RTS
 ;;
 IF NOT(HD_MMC)
-.LA1DF EQUB &00         ;; ;; Flag = &00
-       EQUB &00         ;; ;; &FFFFC900
+.LA1DF EQUB &00		; Result=&00, Ok
+       EQUB &00		; Address=&FFFFC900, dummy address
        EQUB &C9
        EQUB &FF
        EQUB &FF
-       EQUB &1B         ;; ;; Command &1B - Park
-       EQUB &00         ;; ;; Drive 0, Sector 0
+       EQUB &1B		; Action=Park
+       EQUB &00		; Sector=&000000
        EQUB &00
        EQUB &00
-       EQUB &01         ;; ;; 1 sector
-       EQUB &00
+       EQUB &01         ; &01=unpark
+       EQUB &00		; &00=use sector count
 ENDIF
 ;;
 .LA1EA LDA #&00
@@ -6104,20 +6257,34 @@ ENDIF
        BPL LA4B3
        RTS
 
-;; *LCAT
-;; =====
-.LA4BD JSR LA49E
-       JSR LA4B1
-       JSR L93DB	;; CAT the library
-       JMP L89D8
+IF OPTIMISE<6
+; *LCAT
+; =====
+.LA4BD	JSR LA49E
+	JSR LA4B1
+	JSR L93DB	; CAT the library
+	JMP L89D8
 
-;; *LEX
-;; ====
-.LA4C9 JSR LA49E
-       JSR LA4B1
-       JSR L943D	;; EX the library
-       JMP L89D8
-;;
+; *LEX
+; ====
+.LA4C9	JSR LA49E
+	JSR LA4B1
+	JSR L943D	; EX the library
+	JMP L89D8
+ELSE
+; *LCAT, *LEX
+; ===========
+.LA4BD
+.LA4C9
+	PHX		; Save index into command table
+	JSR LA49E
+	JSR LA4B1
+	PLA
+	EOR #cmdLC-L9F2D+4
+	JSR CatOrEx	; CAT or EX the library
+	JMP L89D8	; Reload current directory
+ENDIF
+
 .LA4D5 LDY #&03
 .LA4D7 LDA &C31C,Y
        STA &C22C,Y
@@ -6217,10 +6384,14 @@ ENDIF
        BEQ LA579
 .LA580 JSR LA394
        JSR LA534
-       LDA #&40		; &B8/9=>&C240, control block in workspace
-       STA &B8
-       LDA #&C2
-       STA &B9
+IF OPTIMISE<2
+	LDA #&40	; &B8/9=>&C240, control block in workspace
+	STA &B8
+	LDA #&C2
+	STA &B9
+ELSE
+	JSR PointToCtrl	; &B8/9=>&C240, control block in workspace
+ENDIF
        JSR L8CED
        PHP
        JSR L8E01	; Check
@@ -6341,10 +6512,14 @@ ENDIF
        DEX
        BPL LA66D
        JSR L89D8
-       LDA #&40		;; &B8/9=>&C240
-       STA &B8
-       LDA #&C2
-       STA &B9
+IF OPTIMISE<2
+	LDA #&40	; &B8/9=>&C240
+	STA &B8
+	LDA #&C2
+	STA &B9
+ELSE
+	JSR PointToCtrl	; &B8/9=>&C240
+ENDIF
        JSR L8DFE
        JSR L8E7A
        LDY #&03
@@ -6434,8 +6609,8 @@ ENDIF
        EQUS "Broken directory"
        EQUB &00
 ;;
-;; Get pointer to workspace into &BA/B
-;; ===================================
+;; Get pointer to workspace into &BA/B, return A=&00
+;; =================================================
 .LA744 LDX &F4
        LDA &0DF0,X
        STA &BB
@@ -6511,7 +6686,7 @@ ENDIF
        LDA #<(LA7D4-1)
        STA &0101,X
        LDA #>(LA7D4-1)
-       STA &0102,X      ;; Store return address to LA7D4
+       STA &0102,X      ;; Change return address to LA7D4
        PLX
        PLY
        PLA
@@ -6541,20 +6716,33 @@ ENDIF
        PLP
        RTS
 ;;
-.LA7EC LDA &C291
-       STA &B4
-       LDA &C292
-       STA &B5
-       LDA &C294
-       STA &B7
-       LDA &C293
-       STA &B6
-       LDX #&0B
-.LA802 LDA L883B,X
-       STA &C214,X
-       DEX
-       BNE LA802
-       LDY #&03
+.LA7EC
+IF OPTIMISE<6
+	LDA &C291	; Copy &C291-4 to &B4-7
+	STA &B4
+	LDA &C292
+	STA &B5
+	LDA &C294
+	STA &B7
+	LDA &C293
+	STA &B6
+ELSE
+	LDX #3
+.LA7EE	LDA &C291,X	; Copy &C291-4 to &B4-7
+	STA &B4,X
+	DEX
+	BPL LA7EE
+ENDIF
+IF OPTIMISE<6
+	LDX #&0B
+.LA802	LDA L883C-1,X	; Copy 'load $' control block
+	STA &C214,X
+	DEX
+	BNE LA802
+	LDY #&03
+ELSE
+	JSR RootControl	; Copy 'load $' control block
+ENDIF
 .LA80D LDA &C26C,Y
        STA &C314,Y
        CPX #&00
@@ -6564,13 +6752,30 @@ ENDIF
        DEY
        BPL LA80D
        JMP L82AA
-;;
-.LA821 LDX #&0B
-.LA823 LDA L883B,X
-       STA &C214,X
-       DEX
-       BNE LA823
-       LDY #&03
+
+IF OPTIMISE>=6
+.RootControl
+	LDX #&0B
+.RootCtrlLp
+	LDA L883C-1,X	; Copy 'load $' control block
+	STA &C214,X
+	DEX
+	BNE RootCtrlLp
+	LDY #&03
+	RTS
+ENDIF
+
+.LA821
+IF OPTIMISE<6
+	LDX #&0B
+.LA823	LDA L883C-1,X	; Copy 'load $' control block
+	STA &C214,X
+	DEX
+	BNE LA823
+	LDY #&03
+ELSE
+	JSR RootControl	; Copy 'load $' control block
+ENDIF
 .LA82E LDA &C270,Y
        STA &C314,Y
        CPX #&00
@@ -6580,10 +6785,11 @@ ENDIF
        DEY
        BPL LA82E
        JSR L82AA
-       LDX #<L8831
+.LoadFSM
+       LDX #<L8831	; Point to 'load FSM' control block
        LDY #>L8831
-       JMP L82AE        ;; Load FSM
-;;
+       JMP L82AE        ; Load FSM
+
 .LA849 LDA #&7F		;; &B8/9=>&C27F
        STA &B8
        LDA #&C2
@@ -6596,15 +6802,25 @@ ENDIF
        BEQ LA863
        JMP L8BD3
 ;;
-.LA863 LDA &B6		;; Copy &B6/7 to &C293/4
-       STA &C293
-       LDA &B7
-       STA &C294
-       LDA &B4		;; Copy &B4/5 to &C291/2
-       STA &C291
-       LDA &B5
-       STA &C292
-       LDY #&03
+.LA863
+IF OPTIMISE<6
+	LDA &B6		; Copy &B6/7 to &C293/4
+	STA &C293
+	LDA &B7
+	STA &C294
+	LDA &B4		; Copy &B4/5 to &C291/2
+	STA &C291
+	LDA &B5
+	STA &C292
+	LDY #&03
+ELSE
+	LDY #&FF
+.LA865	INY
+	LDA &B4,Y	; Copy &B4-7 to &C291-4
+	STA &C291,Y
+	CPY #3
+	BNE LA865
+ENDIF
 .LA879 LDA &C314,Y
        STA &C26C,Y
        DEY
@@ -6725,12 +6941,12 @@ ENDIF
 .LA97A CPY #&00
        BNE LA9A8        ;; Jump with OSARGS Y<>0, info on channel
        TAY
-       BNE LA984        ;; Jump with OSARGS Y=0, info on filing system
+       BNE LA984        ;; Jump with OSARGS Y=0, A<>0, info on filing system
        LDA #&08         ;; OSARGS 0,0 - return filing system number
 .LA983 RTS
 ;;
-;; OSARGS Y=0 - Info on filing system
-;; ----------------------------------
+;; OSARGS Y=0, A<>0 - Info on filing system
+;; ----------------------------------------
 .LA984 JSR LA77F        ;; Check FSM
        STX &C3          ;; Store X, pointer to data word in zero page
        DEY              ;; Y=&FF
@@ -7166,13 +7382,16 @@ IF NOT(HD_MMC)
        LDX &C2D4	; Get channel being used
 IF OPTIMISE<3
 	JSR L8374	; Generate 'Data lost' error with X=channel
+	EQUB &CA	; ERR=202
+	EQUS "Data lost, channel"
+	EQUB &00
 ELSE
 	STX &C2D5	; Store channel for error generation
 	JSR L8372	; Generate 'Data lost' error +' on channel NNN'
+	EQUB &CA	; ERR=202
+	EQUS "Data lost"
+	EQUB &00
 ENDIF
-       EQUB &CA         ; ERR=202
-       EQUS "Data lost, channel"
-       EQUB &00
 ENDIF
 
 ; Get pointer to channel buffer
@@ -7428,9 +7647,9 @@ ENDIF
 ;;
 .LAD62 LDA &C3AC,X
        AND #&C8
-       STA &C3AC,X
-       JSR L836B        ;; Generate an error
-       EQUB &DF         ;; ERR=223
+       STA &C3AC,X	; Clear 'pending EOF' flag
+       JSR L836B	; Generate an error
+       EQUB &DF		; ERR=223
        EQUS "EOF"
        EQUB &00
 ;;
@@ -7449,13 +7668,19 @@ ENDIF
        LDX &CF          ;; Get offset to channel
        LDA &C3AC,X      ;; Get channel flag
        AND #&C0
-       ORA #&08         ;; Set EOF flag
+       ORA #&08         ;; Set 'pending EOF' flag, next call will error
        STA &C3AC,X
-       LDY &C2          ;; Restore Y
-       LDX &C3          ;; Restore X
-       SEC              ;; Flag EOF
-       LDA #&FE         ;; EOF value
-       RTS              ;; Return
+IF OPTIMISE<6
+	LDY &C2		; Restore Y
+	LDX &C3		; Restore X
+	SEC		; Return 'EOF met'
+	LDA #&FE	; EOF value
+	RTS		; Return
+ELSE
+	LDA #&FE	; EOF value
+	SEC		; Return 'EOF met'
+	BCS LADCE	; Restore X,Y and return
+ENDIF
 
 ;;
 ;; Read byte from channel
@@ -7484,11 +7709,16 @@ ENDIF
        STA &C2CF
        JSR LB180
        LDA (&BE),Y      ;; Get byte from buffer
-       LDY &C2          ;; Restore Y
-       LDX &C3          ;; Restore X
-       CLC              ;; Clear EOF flag
-       RTS              ;; Return
-;;
+IF OPTIMISE>=6
+	CLC		; Clear EOF flag
+ENDIF
+.LADCE	LDY &C2		; Restore Y
+	LDX &C3		; Restore X
+IF OPTIMISE<6
+	CLC		; Return 'EOF not met'
+ENDIF
+	RTS		; Return
+
 .LADD4 LDY #&02
 .LADD6 LDA &C314,Y
        STA &C230,Y
@@ -7845,7 +8075,7 @@ ENDIF
        LDY #&00
        STY &C2CF
        TAY
-       BMI LB112
+       BMI LB112	;; Channel is writable
 .LB0FA JSR L836B
        EQUB &C1         ;; ERR=193
        EQUS "Not open for update"
@@ -8041,7 +8271,7 @@ ENDIF
        BEQ LB275
        LDA #&00
        JMP LB336
-;;
+;
 .LB275
 IF OPTIMISE<4
        LDX #&09
@@ -8068,7 +8298,8 @@ IF OPTIMISE<4
 .LB2AA DEX
        BPL LB277
 ELSE
-       JSR L8D2C	; Check file not open
+	LDA #&80	; Only check b7 of channel flags
+	JSR CheckOpen	; Check if file not open
 ENDIF
 IF USE65C12
        LDA (&B6)	;; Check 'R' bit
@@ -8329,7 +8560,7 @@ ENDIF
        STA &C321,X
        LDA &C1FC
        STA &C322,X
-.LB4DF JSR LB510
+.LB4DF JSR LB510	; Check elapsed time
 .LB4E2 LDA &C317
        JSR LB5C5
        LDA &C1FB
@@ -8348,13 +8579,13 @@ ENDIF
        EQUB &00
 ;;
 .LB510 LDA #&01
-       LDX #&C8
+       LDX #&C8		; XY=>&C2C8
        LDY #&C2
-       JSR &FFF1
+       JSR &FFF1	; Read TIME to &C2C8 in workspace
        LDX #&00
        LDY #&04
        SEC
-.LB51E LDA &C2C8,X
+.LB51E LDA &C2C8,X	; Subtract from previous TIME
        PHA
        SBC &C2C3,X
        STA &C2C8,X
@@ -8363,27 +8594,31 @@ ENDIF
        INX
        DEY
        BPL LB51E
-       LDA &C2CC
+       LDA &C2CC	; Check b24-b39 of difference
        ORA &C2CB
        ORA &C2CA
-       BNE LB542
-       LDA &C2C9
-       CMP #&02
-       BCC LB545
-.LB542 STY &C2C2
+       BNE LB542	; <>&00, more than &10000cs
+       LDA &C2C9	; Get difference b8-b15
+       CMP #&02		; &200cs? 5.12s?
+       BCC LB545	; <5.12s, return leaving &C2C2 unchanged
+.LB542 STY &C2C2	; >5.11s, set &C2C2 to &xx
 .LB545 RTS
-;;
-.LB546 JSR LB510
+
+.LB546 JSR LB510	; Check elapsed time
        LDA &C317
        JSR LB5C5
        JSR LB560
        EOR &C2C2
        BEQ LB545
-       LDX #<L8831	;; Point to control block
-       LDY #>L8831
-       JSR L82AE
+IF OPTIMISE<5
+	LDX #<L8831	; Point to control block to load FSM
+	LDY #>L8831
+	JSR L82AE	; Load FSM
+ELSE
+	JSR LoadFSM
+ENDIF
        BRA LB4E2
-;;
+
 .LB560 LDA #&FF
        CLC
 .LB563 ROL A
@@ -8397,7 +8632,7 @@ ENDIF
        STA &C2CD
        PHX
        PHY
-       JSR LB510
+       JSR LB510	; Check elapsed time
        LDA &C2CD
        JSR LB5C5
        JSR LB560
@@ -8425,9 +8660,13 @@ ENDIF
 .LB5B5 PLA
        CMP &C317
        BEQ LB5C2
-       LDX #<L8831	;; Point to control block
-       LDY #>L8831
-       JSR L82AE
+IF OPTIMISE<5
+	LDX #<L8831	; Point to control block to load FSM
+	LDY #>L8831
+	JSR L82AE
+ELSE
+	JSR LoadFSM
+ENDIF
 .LB5C2 PLY
        PLX
        RTS
@@ -8742,18 +8981,44 @@ ENDIF
        STA &C2B7
        JSR LB9CA
        JMP LB758
+
+IF OPTIMISE>=6
+.CheckAddr
+	BIT &CD		; Get ADFS status byte
+	BPL ChkNoTube	; Exit with PL if no Tube
+	LDA &C2BA	; A=address &xxAAxxxx
+	LDX &C2BB	; X=address &AAxxxxxx
+	JSR L8053	; Check for shadow screen
+	LDA &C2BA	; A=address &xxAAxxxx
+	CMP #&FE	; If it &xxFExxxx - shadow screen or I/O?
+	BCC ChkTube	; <&xxFExxxx - Tube transfer
+	LDA &C2BB	; A=address &AAxxxxxx
+	INC A		; Is it &FFxxxxxx?
+	BEQ ChkNoTube	; Exit with PL if I/O transfer, no Tube
+.ChkTube
+	LDA #&FF	; Exit with MI if Tube transfer
+.ChkNoTube
+	RTS
+ENDIF
+
 ;;
-.LB86B BIT &CD		;; Get ADFS status byte
-       BPL LB898	;; Skip past if no Tube
-       LDA &C2BA
-       LDX &C2BB
-       JSR L8053        ;; Check for shadow screen
-       LDA &C2BA
-       CMP #&FE
-       BCC LB885
-       LDA &C2BB
-       INC A
-       BEQ LB898
+.LB86B
+IF OPTIMISE<6
+	BIT &CD		; Get ADFS status byte
+	BPL LB898	; Skip past if no Tube
+	LDA &C2BA
+	LDX &C2BB
+	JSR L8053	; Check for shadow screen
+	LDA &C2BA
+	CMP #&FE
+	BCC LB885
+	LDA &C2BB
+	INC A
+	BEQ LB898
+ELSE
+	JSR CheckAddr	; Check transfer address
+	BPL LB898	; Not a Tube transfer
+ENDIF
 .LB885 PHP
        SEI
        JSR L8032
@@ -8849,7 +9114,7 @@ ENDIF
        JSR LB8A5
        LDA &C317
        JSR LB946
-       LDA #&00		;; &B4/5=>&C300
+       LDA #&00		;; &B4/5=>&C300, CSDNAME
        STA &B4
        LDA #&C3
        STA &B5
@@ -8867,7 +9132,7 @@ ENDIF
        JSR LB8A5
        LDA &C31B
        JSR LB946
-       LDA #&0A
+       LDA #&0A		;; &B4/5=>&C30A, LIBNAME
        STA &B4
        LDA #&C3
        STA &B5
@@ -8932,17 +9197,23 @@ ENDIF
        BNE LB9D3
        RTS
 ;;
-.LB9D3 BIT &CD		;; Check ADFS status byte
-       BPL LBA03	;; Jump if no hard drive
-       LDA &C2BA
-       LDX &C2BB
-       JSR L8053	;; Check for screen memory
-       LDA &C2BA
-       CMP #&FE
-       BCC LB9ED
-       LDA &C2BB
-       INC A
-       BEQ LBA03
+.LB9D3
+IF OPTIMISE<6
+	BIT &CD		; Check ADFS status byte
+	BPL LBA03	; Jump if no Tube present
+	LDA &C2BA
+	LDX &C2BB
+	JSR L8053	; Check for screen memory
+	LDA &C2BA
+	CMP #&FE
+	BCC LB9ED
+	LDA &C2BB
+	INC A
+	BEQ LBA03
+ELSE
+	JSR CheckAddr	; Check transfer address
+	BPL LBA03	; Not a Tube transfer
+ENDIF
 .LB9ED LDA #&40
        TSB &CD		;; Set bit 6 of status byte
        JSR L8032	;; Check for Tube
@@ -9094,8 +9365,12 @@ ENDIF
        LDA #&01
        TSB &C2E4
        LDA #&14
-       ORA &0D5C
-       STA &FE28	;; FDC Status/Command
+IF OPTIMISE<6
+	ORA &0D5C
+	STA &FE28	; FDC Status/Command
+ELSE
+	JSR SetDriveCommand
+ENDIF
        JSR LBCE5
        LDA &A1
        ROR A
@@ -9186,8 +9461,7 @@ ENDIF
        JSR LBBBE	; Set up NMIs
        JMP LBF0A	; Jump to check sector and calculate track/sector
 ;
-.LBBBE 
-       JSR LBC01	; Claim NMIs
+.LBBBE JSR LBC01	; Claim NMIs
        LDA &C2E8
        STA &0D5C
        STZ &A0		;; Clear error
@@ -9331,9 +9605,10 @@ ENDIF
        LDA (&B0),Y
        STA &0D0C
 .LBC9F RTS
-;;
-;; NMI code, copied to &0D00
-;; -------------------------
+
+; NMI code, copied to &0D00
+; -------------------------
+; DO NOT ATTEMPT TO OPTIMISE!
 .LBCA0 PHA
        LDA &FE28        ;; FDC Status/Command
        AND #&1F
@@ -9361,7 +9636,7 @@ ENDIF
        BVC LBCC4
        LDA &F4
        PHA		;; Save current ROM
-       LDA #&00		;; Replaced wit ADFS ROM number
+       LDA #&00		;; Replaced with ADFS ROM number
        STA &F4		;; Page in ADFS ROM
        STA &FE30
        PHX
@@ -9432,12 +9707,23 @@ ENDIF
        TRB &A2
        RTS
 ;;
-.LBD55 LDA #&00
-       STA &A3
-       ORA &0D5C
-       STA &FE28	;; FDC Status/Command
-       JMP LBCE5
-;;
+.LBD55	LDA #&00
+	STA &A3
+IF OPTIMISE<6
+	ORA &0D5C
+	STA &FE28	; FDC Status/Command
+ELSE
+	JSR SetDriveCommand
+ENDIF
+	JMP LBCE5
+
+IF OPTIMISE>=6
+.SetDriveCommand
+	ORA &0D5C
+	STA &FE28	; FDC Status/Command
+	RTS
+ENDIF
+
 .LBD62 ROR &C2E4
        BCC LBD6A
        ORA #&04
@@ -9549,8 +9835,12 @@ ENDIF
        JSR LBD46
        JSR LBD50
        LDA #&54
-       ORA &0D5C
-       STA &FE28	;; FDC Status/Command
+IF OPTIMISE<6
+	ORA &0D5C
+	STA &FE28	; FDC Status/Command
+ELSE
+	JSR SetDriveCommand
+ENDIF
        INC &A3
        BNE LBE41
 .LBE5C LDA &A2
@@ -9561,9 +9851,13 @@ ENDIF
        INC &A3
        JSR LBD40
        LDA #&00
-       ORA &0D5C
-       STA &FE28	;; FDC Status/Command
-       BPL LBE41
+IF OPTIMISE<6
+	ORA &0D5C
+	STA &FE28	; FDC Status/Command
+ELSE
+	JSR SetDriveCommand
+ENDIF
+	BPL LBE41
 ;;
 ;; NMI Routine - called from &0D00
 ;; ===============================
@@ -9833,6 +10127,6 @@ IF HD_SCSI
         EQUB &A9	;; 'A'corn revision 9
 ENDIF
 
-PRINT "Code ends at",~LBFFF+1," (",(&BFFF - LBFFF), "bytes free )"
+PRINT "Code ends at",~LBFFF+1,"(",(&BFFF-LBFFF),"bytes free)"
 
 SAVE "", &8000, &C000

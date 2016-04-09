@@ -7,7 +7,7 @@ HD_SCSI=FALSE
 HD_IDE=TRUE		; IDE drivers
 HD_MMC=FALSE
 ;
-OPTIMISE=3		; How hard to optimise
+OPTIMISE=6		; How hard to optimise
 FULL_INFO=TRUE		; Full *INFO
 FULL_ACCESS=TRUE	; Full OSFILE 1-4
 UNSUPPORTED_OSFILE=TRUE	; Unknown OSFILE returns A preserved

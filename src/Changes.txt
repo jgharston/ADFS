@@ -70,3 +70,10 @@ Will start going through Zorn's high-crunch optimisations.
 adfs.asm, 08-Apr-2016
 ---------------------
 Tail optimised converting disk_addr to side/track/sector.
+
+adfs.asm, 09-Apr-2016
+---------------------
+Tail optimised LoadFSM, RootSector. Merged *CAT/*EX, looped some code, crunched
+BGET return, SetDriveCommand, CheckAddr, SectToCtrl. ADFS-Master-MMC now crunched
+down to exactly 16384 bytes. Need a few more bytes to be able to check for MMC
+presence on Reset to prevent hanging when absent.
