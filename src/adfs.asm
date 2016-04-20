@@ -468,21 +468,21 @@ IF HD_IDE
 .IOWrite
        LDA (&80),Y
        STA &FC40
-       BRA TransferByte
+       BCS TransferByte
 .IORead
        LDA &FC40
        STA (&80),Y
-       BRA TransferByte
+       BCC TransferByte
 .TransTube
        BCC TubeRead
 .TubeWrite
        LDA TUBEIO
        STA &FC40
-       BRA TransferByte
+       BCS TransferByte
 .TubeRead
        LDA &FC40
        STA TUBEIO
-       BRA TransferByte
+       BCC TransferByte
 ;
 .L81AD			;; Aligned to L81AD
 IF L81AD<>&81AD
@@ -4706,19 +4706,18 @@ ENDIF
        EQUB &00
        EQUB &00
        EQUB &02         ;; back=2
-;;
-;;
-;; Check if hard drive hardware present
-;; ====================================
-;; On entry: none
-;; On exit:  EQ  - hard drive present
-;;           NE  - no hard drive present
-;;           X,Y - preserved
-;;           A   - corrupted
-;;
+
+
+; Check if hard drive hardware present
+; ====================================
+; On entry: none
+; On exit:  EQ  - hard drive present
+;           NE  - no hard drive present
+;           A,X,Y allowed to be corrupted
 IF HD_MMC
-.L9A6C LDA #0           ;; EQ - present
-       RTS
+.L9A6C	STZ mmcstate%	; mark the mmc system as un-initialized
+	JMP initializeDriveTable
+	; Returns EQ=Ok, NE=not present or no ADFS partitions
 ENDIF
 IF HD_IDE
 .L9A6C LDA &FC47        ;; &FF - absent, <>&FF - present
@@ -5052,11 +5051,6 @@ ENDIF
        BNE L9C10        ;; No hard drive, jump forward
        LDA #&20
        TSB &CD          ;; Signal hard drive present
-IF HD_MMC
-       STZ mmcstate%    ;; mark the mmc system as un-initialized
-       JSR initializeDriveTable
-;;     BNE xxx		;; What do we do if an error occurs?
-ENDIF
 .L9C10 PLA              ;; Get selection flag from stack
        CMP #&43         ;; '*fadfs'/F-Break type of selection?
        BNE L9C18        ;; No, jump to keep context

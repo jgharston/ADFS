@@ -45,7 +45,7 @@ ENDIF
     LDA #4
 .wait
     BIT ifr%            ;; Bit 2 of IFR is the Shift Reg Interrupt flag
-    BEQ wait
+    BEQ wait		;; Hangs here if no hardware present
     JSR ShiftRegMode0
     LDA sr%
     RTS

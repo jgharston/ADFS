@@ -95,7 +95,7 @@ ENDIF
      LDA #send_op_cond
      JSR MMC_SetCommand
      JSR MMC_DoCommand
-     CMP #2                          ; anything other that 'idle'
+     CMP #2                          ; anything other than 'idle'
 .il10
      BCS ifail                       ; not idle, fail this attempt
 .il11
@@ -376,11 +376,13 @@ ENDIF
 
 .initializeDriveTable
 {
-;; Load 512b sector 0 (MBR) to &C000-&C1FF
-;; Normally MBR resides here, but we do this before MBR is loaded
-;; We can't use OSWORD &72 to do this, as we don't want alternative bytes skipped
-;; This is done during filing system selection, so generating errors would leave
-;; system in an inconsistant state.
+; Load 512b sector 0 (MBR) to &C000-&C1FF
+; Normally MBR resides here, but we do this before MBR is loaded
+; We can't use OSWORD &72 to do this, as we don't want alternative bytes skipped
+; This is done during filing system selection, so generating errors would leave
+; system in an inconsistant state.
+;
+; This MUST be able to terminate if the hardware is absent.
 ;
      JSR MMC_BEGIN      ; Initialize the card, if not already initialized
      BNE init_exit	; Couldn't initialise
