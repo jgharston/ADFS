@@ -8,9 +8,11 @@
 ; Assemble the code by starting the build with one of the master include
 ; files to set up the defines for the required build. This code will
 ; build:
-; ADFS Master SCSI v1.50r9
-; ADFS Master IDE  v1.53r21
-; ADFS Master MMC
+;  ADFS Master SCSI v1.50r9
+;  ADFS Master IDE  v1.53r24
+;  ADFS Master MMC
+; Does not yet build correctly for BBC or Electron.
+; TODO: Add +WS to workspace references.
 
 
 ; OPTIMISE flag sets how hard to optimise
@@ -21,7 +23,21 @@
 ; 5 Tail optimise sector_address to side/track/sector, LoadFSM, RootSector
 ; 6 Merge *CAT/*EX, loop some code, crunch BGET return, SetDriveCommand, CheckAddr, SectToCtrl
 
-; Testing
+; Other options, set from launch file:
+; TARGETOS		Target machine MOS
+; FLOPPY		Include floppy drivers
+; HD_SCSI		Build with SCSI drivers (only one possible)
+; HD_IDE		Build with SCSI drivers (only one possible)
+; HD_MMC		Build with SCSI drivers (only one possible)
+; FULL_INFO		Full *INFO
+; FULL_ACCESS		Full OSFILE 1-4
+; UNSUPPORTED_OSFILE	Unknown OSFILE returns A preserved
+; PRESERVE_CONTEXT	Ctrl-Break doesn't lose context
+; LARGE_DISK		Future development
+; TRIM_REDUNDANT	Remove redundant code
+
+
+; Testing 2016/04/09
 ;  TRIM_REDUNDANT works.
 ;  OPTIMISE=1 works (use 65c12 ops)
 ;  OPTIMISE=2 works (subroutines for major chunks)
@@ -55,7 +71,7 @@ IF   TARGETOS=0
 ELIF TARGETOS=1 OR TARGETOS=2
   CPU 0			; 6502
   VERBASE=&130		; BBC B, BBC B+
-  FDCBASE=&FE84
+  FDCBASE=&FE84		; Floppy controller
   DRVSEL =FDCBASE-4	; Drive control register
   FDCRES =&20		; Reset FDC
   FDCSIDE=&04		; Side select
@@ -79,7 +95,7 @@ ELIF TARGETOS>2
   WS=0			; Offset to workspace from &C000
 ENDIF
 
-VERSION=VERBASE + (PRESERVE_CONTEXT AND 1) + (HD_IDE AND 2) + (HD_MMC AND 4)
+VERSION=VERBASE + (PRESERVE_CONTEXT AND 1) + (HD_IDE AND 2) + (HD_MMC AND 6)
 ; Version number x.yz
 ;                1.0z = Electron
 ;                1.3z = BBC B/B+
@@ -88,8 +104,8 @@ VERSION=VERBASE + (PRESERVE_CONTEXT AND 1) + (HD_IDE AND 2) + (HD_MMC AND 4)
 ;                |||+---preserve context on break and various bugfixes
 ;                |00----SCSI drivers
 ;                |01----IDE drivers
-;                |10----User port MMC drivers
-;                |11----reserved
+;                |10----reserved
+;                |11----User port MMC drivers
 ;                +------reserved
 
 IF TARGETOS>2 AND OPTIMISE>=1
@@ -97,12 +113,19 @@ IF TARGETOS>2 AND OPTIMISE>=1
 ELSE
   USE65C12=FALSE
 ENDIF
-
+IF HD_IDE
+  DRV4=&80              ; b7=All four drives on IDE device 0
+; DRV4=&00              ; b7=Drives 0/1 on device 0, drives 2/3 on device 1
+ELSE
+  DRV4=&00
+ENDIF
 
 ; ROM HEADER
 ; ==========
 ORG &8000
-.L8000 EQUB &00,&00,&00			; No language entry
+.L8000 EQUB &00       			; No language entry
+       EQUB &00
+       EQUB DRV4                        ; Use as configuration options
        JMP  L9ACE			; Jump to service handler
        EQUB &82				; Service ROM, 6502 code
        EQUB L8017-L8000			; Offset to (C) string
@@ -115,7 +138,8 @@ ORG &8000
 IF   HD_MMC
        EQUS "(C)2016",0
 ELIF HD_IDE
-       EQUS "(C)2005",0
+;;     EQUS "(C)2005",0
+       EQUS "(C)2015",0
 ELSE
        EQUS "(C)1984",0
 ENDIF
@@ -207,27 +231,32 @@ ENDIF
 
 IF HD_IDE
 .X807E RTS
-       NOP
-       NOP
-       NOP
-       RTS
+;      NOP
+;      NOP
+;      NOP
+;      RTS
 ENDIF
 IF HD_IDE OR HD_MMC
 .ReadBreak
-       JSR L9A88
+       LDA &028D
        AND #&01
        RTS
 .WaitForData
-       LDA &FC47        ;;  Loop until data ready
-       BIT #8
-       BEQ WaitForData
+       PHA              ; Balance stack
+.WaitForLp
+       PLA
+       LDA &FC47        ; Get status
+       PHA
+       AND #8
+       BEQ WaitForLp    ; Loop until data ready
+       PLA              ; Return status
        RTS
 .MountCheck
-       JSR LA19E        ;; Do *MOUNT, then reselect ADFS
-       JMP L9B4A
+       JSR LA19E        ; Do *MOUNT, then reselect ADFS
+       JMP L9B50
 ENDIF
 IF HD_IDE
-       EQUB 0
+       EQUB &F9
 ENDIF
 
 IF HD_SCSI
@@ -252,7 +281,7 @@ ENDIF
 ; ------------------------
 .L8099 LDA &C200        ;; Get default retries
        STA &CE          ;; Set current retries
-       RTS
+.L809E RTS
 ;;
 ;;
 .L809F JMP L82C9	;; Jump to 'Escape' error
@@ -304,7 +333,11 @@ ENDIF
 ;; retries a number of times, allowing interuption by an Escape event.
 ;;
 .L80BD JSR L80DF        ;; Do the specified command
+IF HD_IDE OR HD_MMC
+       BEQ L809E        ;; Exit if ok
+ELSE
        BEQ L8098        ;; Exit if ok
+ENDIF
        CMP #&04         ;; Not ready?
        BNE L80D7        ;; Skip past if result<>Not ready
 ;;                         If Drive not ready, pause a bit
@@ -347,9 +380,13 @@ IF FLOPPY
 .L80F0 JSR LBA4B        ;; Do floppy operation
        BEQ L8110        ;; Completed ok
        PHA              ;; Save result
+IF OPTIMISE<6
        LDY #&06         ;; Update ADFS error infomation
        LDA (&B0),Y      ;; Get Drive+Sector b16-b19
        ORA &C317        ;; OR with current drive
+ELSE
+       JSR GetDrive
+ENDIF
        STA &C2D2        ;; Store
        INY
        LDA (&B0),Y      ;; Get Sector b8-b15
@@ -364,9 +401,14 @@ ENDIF
 ;;
 ;; Hard drive hardware is present. Check what drive is being accessed.
 ;;
-.L8111 LDY #&06
+.L8111
+IF OPTIMISE<6
+       LDY #&06
        LDA (&B0),Y	;; Get drive
        ORA &C317	;; OR with current drive
+ELSE
+       JSR GetDrive
+ENDIF
 IF FLOPPY
        BMI L80F0        ;; Jump back with 4,5,6,7 as floppies
 ENDIF
@@ -421,7 +463,7 @@ IF HD_IDE
        EOR #&08
        BEQ CommandOk
        LDA #&27         ;; Return 'unsupported command' otherwise
-       BRA CommandExit
+       BNE CommandExit
 .CommandOk
        LDY #9
 .CommandSaveLp
@@ -447,14 +489,13 @@ IF HD_IDE
        BIT &CD
        BVC CommandStart ;; Accessing I/O memory
        PHP
-       PHX
+       TXA
+       PHA
        LDX #&27         ;; Point to address block
        LDY #&C2
-       LDA #0           ; Set Tube action
-       ROL A		; A=0/1 for Read/Write
-       EOR #1		; A=1/0 for Read/Write
-       JSR L8213	; Start Tube transfer
-       PLX
+       JSR TubeAction   ;; Set Tube action
+       PLA
+       TAX
        PLP
 .CommandStart           ;; C=R/W, &B0/1=>block
        JSR SetSector    ;; Set sector, count, command
@@ -474,6 +515,7 @@ IF HD_IDE
        STA (&80),Y
        BCC TransferByte
 .TransTube
+       JSR TubeDelay
        BCC TubeRead
 .TubeWrite
        LDA TUBEIO
@@ -485,9 +527,9 @@ IF HD_IDE
        BCC TransferByte
 ;
 .L81AD			;; Aligned to L81AD
-IF L81AD<>&81AD
-       ERROR L81AD/CommandDone must be anchored at &81AD
-ENDIF
+;IF L81AD<>&81AD
+;       ERROR L81AD/CommandDone must be anchored at &81AD
+;ENDIF
 .CommandDone
        JSR GetResult    ;; Get IDE result
 .CommandExit
@@ -533,10 +575,10 @@ ENDIF
        INY
        CPY #10
        BNE CommandRestore
-       BRA CommandDone  ;; Jump to get result
+       BEQ CommandDone  ;; Jump to get result
 
 .SetGeometry
-       JSR WaitNotBusy
+       JSR WaitNotBusySelect
        LDA #64          ;; 64 sectors per track
        STA &FC42
        STA &FC43
@@ -556,8 +598,12 @@ IF HD_SCSI
        LDA (&B0),Y
        JSR L833E        ;; Send to SCSI data port
        INY
+IF OPTIMISE<6
        LDA (&B0),Y	;; Get Drive
        ORA &C317	;; OR with current drive
+ELSE
+       JSR GetDriveY
+ENDIF
        STA &C333
        JMP L814C        ;; Send rest of command block
 ;;
@@ -678,45 +724,45 @@ ENDIF
 .L8212 SEI
 .L8213 JSR &0406
        LDY #&00
+.TubeDelay
        JSR L821B	; Delay
 .L821B JSR L821E
 .L821E RTS
 
 
 IF HD_IDE
+.TubeAction
+       LDA #0           ; Set Tube action
+       ROL A		; A=0/1 for Read/Write
+       EOR #1		; A=1/0 for Read/Write
+       BCC L8213	; Start Tube transfer
 .SetSector
        PHP
        JSR WaitNotBusy  ;; Save CC/CS Read/Write
        LDY #8
-       LDA #1           ;; One sector
-       STA &FC42
-       CLC              ;; Set sector b0-b5
-       LDA (&B0),Y
-       AND #63
-       ADC #1
-       STA &FC43
-       DEY              ;; Set sector b8-b15 Y=7
-       LDA (&B0),Y
-       STA &FC44
-       DEY              ;; Set sector b16-b21 Y=6
-       LDA (&B0),Y
-       JSR SetCylinder
-       INY              ;; Merge Drive and Head Y=7
-       INY		;; Y=8
-       EOR (&B0),Y
+       LDA (&B0),Y      ;; Y=8
+       JSR SetSecLow    ;; Set sector b0-b5, count=1
+       DEY        
+       LDA (&B0),Y      ;; Y=7
+       STA &FC44        ;; Set sector b8-b15
+       DEY            
+       LDA (&B0),Y      ;; Y=6
+       JSR SetCylinder  ;; Set sector b16-b21
+       INY
+       INY	
+       EOR (&B0),Y	;; Y=8
        AND #2
        EOR (&B0),Y
-       JSR SetDrive     ;; Get SCSI command &08 or &0A
-       DEY
-       DEY
-       DEY
-       LDA (&B0),Y
+       JSR SetDrive     ;; Merge Drive and Head
+       LDY #5
+       LDA (&B0),Y      ;; Get SCSI command &08 or &0A
 .SetCommand
+;; TODO Implement MODE_SENSE somehow
        ASL A		;; Convert &08/&0A to &20/&30
        ASL A
        ASL A
-       EOR #&60         
-       LDY #0           ;; Set IDE command &20 or &30
+       EOR #&60         ;; Set IDE command &20 or &30         
+       LDY #0
        PLP              ;; Get CC/CS Read/Write back
 .SetCmd
        STA &FC47
@@ -726,45 +772,41 @@ IF HD_IDE
        ROL A
        ROL A
 .SetDriveA
-       AND #&13         ;; Set device + sector b6-b7
-       STA &FC46
+       BIT &8002
+       BPL SetDriveB
+       AND #&03         ;; All on device 0
+.SetDriveB
+       AND #&13 
+       STA &FC46        ;; Set device + sector b6-b7
        RTS
 .SetCylinder
-       PHA              ;; Set sector b16-b21
-       AND #&3F
-       STA &FC45
+       PHA       
+       BIT &8002
+       BMI SetCyl2      ;; All on device 0
+       AND #&3F         ;; Split between device 0 and 1
+.SetCyl2
+       STA &FC45        ;; Set sector b16-b21
        PLA              ;; Get Drive 0-1/2-3 into b1
        ROL A
        ROL A
        ROL A
        ROL A
        RTS
+.SetSecLow
+       AND #63
+       CLC              ;; Set sector b0-b5
+       ADC #1
+       STA &FC43
+       LDA #1           ;; One sector
+       STA &FC42
+       RTS
 .SetRandom
-       JSR SetCylinder  ;; Set sector b16-b21
-       EOR &C201,X      ;; Merge Drive and Head
-       AND #&02
-       EOR &C201,X
        JSR SetDrive     ;; Set device and command
        PLA
        PHP
-       BRA SetCommand
-.GetResult
-       LDA &FC47        ;; Get IDE result
-       AND #&21
-       BEQ GetResOk
-       LDA &FC41        ;; Get IDE error code, CS already set
-       LDX #&FF
-.GetResLp
-       INX              ;; Translate result code
-       ROR A
-       BCC GetResLp
-       LDA ResultCodes,X
-.GetResOk
-       RTS
-       EQUB 0,0,0,0,0,0,0,0
-       EQUB 0,0,0,0,0,0
-       LDA #&FF         ;; leftover code
-       JMP &81D4        ;; Jump to return result
+       BNE SetCommand
+       EQUB 0,0,0,0
+       EQUD 0,0,0,0,0,0
 ENDIF
 IF HD_SCSI
 .L821F LDX #&27
@@ -959,8 +1001,13 @@ ELSE
 ENDIF
 ;
 IF HD_IDE
-       EQUB 0,0,0,0,0,0,0,0
-       EQUB 0,0
+.L831E
+.TubeStore
+       JSR TSDelay      ;; JSR/RTS delay
+       STA TUBEIO       ;; Send to Tube
+.TSDelay
+       RTS
+       EQUB 0,0,0
 ENDIF
 IF HD_SCSI
 .L831E JSR L8324	;; Wait until not busy, then write command to command register
@@ -987,7 +1034,7 @@ IF HD_SCSI
        PHP              ;; Save IRQ disable
        CLI              ;; Enable IRQs for a moment
        PLP              ;; Restore IRQ disable
-       BIT &CD          ;; Check Ensure
+       BIT &CD          ;; Check 'Files ensuring'
        BNE L8328        ;; Loop back if set
        RTS
 ENDIF
@@ -997,24 +1044,27 @@ ENDIF
 IF HD_MMC
 ENDIF
 IF HD_IDE
+.WaitNotBusySelect
+.L8332  NOP             ;; TODO: Try both 1MHz buses
+        NOP
+        NOP
 .WaitNotBusy
-.L8332  PHP             ;; Get IDE status
-.L8333  JSR L806F
+        PHP      
+.L8333  JSR L806F       ;; Get IDE status
         AND #&C0        ;; Wait for IDE not busy and ready
         CMP #&40
         BNE L8333
         PLP
         RTS
         EQUB 0,0,0,0,0,0,0,0
-        EQUB 0,0,0
 ENDIF
 IF HD_SCSI
 .L8332 PHA              ;; Save A
 .L8333 JSR L806F        ;; Get SCSI status
-       AND #&20         ;; BUSY?
-       BEQ L8333        ;; Loop until BUSY
+       AND #&20         ;; Check REQUEST
+       BEQ L8333        ;; Loop until REQUEST set
        PLA              ;; Restore A
-       BIT &CC
+       BIT &CC          ;; Set flags from SCSI status
        RTS
 
 .L833E JSR L8332        ;; Wait until SCSI ready
@@ -1022,11 +1072,12 @@ IF HD_SCSI
        STA &FC40
        LDA #&00		;; Return Ok
        RTS
-ENDIF
-
 .L8349 PLA              ;; Drop return address
        PLA
        JMP L81AD        ;; Jump to get result and return
+ELSE
+       EQUB 0,0,0,0,0
+ENDIF
 
 ; Generate an error
 ; =================
@@ -1085,11 +1136,11 @@ ENDIF
        STA &0100,Y	; Add a space
        TXA
 IF OPTIMISE<3
-; This initially looks like a bug, if X=&30-&39 inserts in decimal as though
+; This initially looks like a bug, if X=&30-&39 it inserts in decimal as though
 ; it's a channel number, but then continues to append disk error information.
 ; This is done for 'Data lost, channel NNN at :D/SSSSSS' which could even
-; become 'Data lost, channel NNN at :D/SSSSSS on channel NNN'. Better to
-; generate the 'Data lost' error as a channel error.
+; become 'Data lost, channel NNN at :D/SSSSSS on channel NNN'. Would be better
+; to generate the 'Data lost' error as a channel error.
 	CMP #&30
 	BCS L839B	; &30+, jump to check if channel number
 .L8395	JSR L8451	; Insert disk error as hex number
@@ -1510,8 +1561,18 @@ ENDIF
 ;;
 .L868D JSR L834E        ;; Generate error
        EQUB &98         ;; ERR=152
+
+IF PRESERVE_CONTEXT AND HD_SCSI
+       EQUS "Needs COMPACT"
+       EQUB &00
+.ReadBreak
+       JSR L9A88
+       AND #&01
+       RTS
+ELSE
        EQUS "Compaction required"
        EQUB &00
+ENDIF
 ;;
 .L86A5 LDY #&02
 .L86A7 DEX
@@ -1746,7 +1807,7 @@ ENDIF
 
 ; Control block to load FSM
 ; -------------------------
-.L8831 EQUB &01		; Result=&01, Dick not formatted
+.L8831 EQUB &01		; Result=&01, Disk not formatted
        EQUB &00		; Load to &FFFFC000
        EQUB &C0
        EQUB &FF
@@ -2127,7 +2188,7 @@ ENDIF
 ;; b6 Tube being used
 ;; b5 Hard Drive present
 ;; b4 FSM in memory inconsistant/being loaded
-;; b3 -
+;; b3 (not documented, unsure)
 ;; b2 *OPT1 setting
 ;; b1 Bad Free Space Map
 ;; b0 Files being ensured
@@ -2283,13 +2344,13 @@ IF FLOPPY
        STA &C2D1
        LDA &C21D
        STA &C2D0
-       JSR LACE6
-       STA &C204,X
+       JSR LACE6	;; Look for an unmodified buffer
+       STA &C204,X	;; Clear buffer
        TXA
-       LSR A
-       LSR A
-       ADC #&C9
-       JMP LBA4E
+       LSR A		;; Divide by 4 to get buffer address
+       LSR A		
+       ADC #&C9		;; Point to some workspace at &C900+x
+       JMP LBA4E	;; Jump to load partial sector via buffer
 ENDIF
 ;;
 ;; Get bytes from a partial sector from a hard drive
@@ -2330,12 +2391,12 @@ IF HD_MMC
        BNE PartError	;; Bad drive or sector
 ENDIF
 IF HD_IDE
-       PHX             ;; Load a partial sector
+       TXA
+       PHA             ;; Load a partial sector
        JSR SetGeometry ;; Pass sector address to IDE
        JSR SetSector
-       PLX
-       NOP
-       NOP
+       PLA
+       TAX
        NOP
        NOP
        NOP
@@ -2383,7 +2444,11 @@ ELSE
        BEQ L8BB8        ;; Jump to ignore extra bytes
        BIT &CD          ;; Tube or I/O?
        BVC L8BB5        ;; Jump to read to I/O memory
+IF HD_IDE
+       JSR TubeDelay    ;; Longer delay
+ELSE
        JSR L821B        ;; Pause a bit
+ENDIF
        STA TUBEIO       ;; Send to Tube
        BVS L8BB7        ;; Jump ahead to loop back
 .L8BB5 STA (&B2),Y      ;; Store byte to I/O
@@ -2528,7 +2593,7 @@ IF FULL_ACCESS
        BNE RdNext
        INY
        INY
-       BRA RdNotE
+       BNE RdNotE
 .RdIsE
        DEY
        DEY
@@ -3060,6 +3125,12 @@ IF OPTIMISE>=6
 	LDA &C316
 	STA &C21B
 	RTS
+.GetDrive
+        LDY #&06
+.GetDriveY
+        LDA (&B0),Y
+        ORA &C317
+        RTS
 ENDIF
 
 .L8FE8 JSR L8870
@@ -3245,7 +3316,7 @@ IF FULL_ACCESS
         BNE WrNext
         INY
         INY
-        BRA WrNotE
+        BNE WrNotE
 .WrIsE
         DEY
         DEY
@@ -3445,25 +3516,20 @@ ENDIF
 .L9247 STX &B8          ;; Store pointer to control block
        STY &B9
        TAY              ;; Y=function
+       LDX #&00         ;;                             
+       STX &C2D5        ;;                             
+       ASL A            ;; Index into dispatch table   
+       TAX              ;;                             
+       INX              ;;                             
+       INX              ;;                             
 IF UNSUPPORTED_OSFILE
-IF NOT(TRIM_REDUNDANT)
-       NOP		;; Unsupported calls should return A preserved
-ENDIF
-       CLR &C2D5
-       ASL A
-       TAX
-       TYA
+       TYA              ;; A=function, prepare for unsupported call
+       NOP
 ELSE
-       LDX #&00         ;;                             CLR &C2D5
-       STX &C2D5        ;;                             ASL A
-       ASL A            ;; Index into dispatch table   TAX
-       TAX              ;;                             TYA
+       BMI L9270        ;; <&FF, return with A=func*2
 ENDIF
-       INX              ;;                             INX
-       INX              ;;                             INX
-       BMI L9270        ;; <&FF, return with A=func*2  BMI L9270
        CPX #&12
-       BCS L9270        ;; >&07, return with A=func*2
+       BCS L9270        ;; >&07, return with A=func*2 (A=func with bugfix)
        LDA L9271+1,X    ;; Get dispatch address-1
        PHA		;; Stack high byte of address-1
        LDA L9271+0,X
@@ -3562,8 +3628,12 @@ ENDIF
        RTS		; Jump to address via stack
 ;;
 .L92CB PHA
+IF USE65C12
+       PHX
+ELSE
        TXA
        PHA
+ENDIF
        LDA &B6
        PHA
        LDA &B7
@@ -3575,8 +3645,12 @@ ENDIF
        STA &B7
        PLA
        STA &B6
+IF USE65C12
+       PLX
+ELSE
        PLA
        TAX
+ENDIF
        PLA
        RTS
 ;;
@@ -3586,7 +3660,11 @@ ENDIF
        JSR L928F	; Print filename at (&B6)
        JSR LA036	; Print a space
        LDY #&04         ;; Point to access bits
+IF FULL_INFO
+       LDX #&04         ;; Allow four characters padding
+ELSE
        LDX #&03         ;; Allow three characters padding
+ENDIF
 .L92F1 LDA (&B6),Y      ;; Get access bit
        ROL A
        BCC L92FD        ;; Not set, step to next one
@@ -3612,7 +3690,12 @@ ENDIF
        JSR L9322        ;; Print it
        LDA #&29
        JSR LA03C        ;; Print ')'
+IF FULL_INFO
+       LDA #&20         ;; Finish with a space
+       RTS
+ELSE
        JMP LA036        ;; Finish with a space
+ENDIF
 ;;
 ;; Access characters
 ;; =================
@@ -3930,8 +4013,8 @@ IF NOT(FULL_INFO)
 ENDIF
 ;
 IF FULL_INFO AND NOT(TRIM_REDUNDANT)
-       BRA L951E
-       EQUB 0,0,0,0,0,0,0,0
+       JMP L951E
+       EQUB 0,0,0,0,0,0,0
        EQUB 0,0,0,0,0,0
 .L951E LDX #&0A         ;; X=display column 10
        LDY #&0D         ;; Y=offset to top byte of load address
@@ -4517,8 +4600,14 @@ ENDIF
 .L9956 JSR L994A        ;; Clear existing LWR bits, preserve ED bit
        LDY #&04
        LDA (&B6),Y	;; Check 'E' bit
+IF FULL_ACCESS
+;       BMI L999E        ;; Jump if 'E' file
+;       DEY
+        JSR L999E
+ELSE
        BMI L996A        ;; Jump if 'E' file
        DEY
+ENDIF
        LDA (&B6),Y      ;; Get 'D' bit
        AND #&80
 IF USE65C12
@@ -4555,6 +4644,16 @@ ENDIF
        BMI L99AA        ;; Jump past if already 'E' or 'D'
        CMP #&45		;; Is character 'E'?
        BNE L99AA        ;; Jump past if not setting 'E'
+IF FULL_ACCESS
+       LDX #4
+       BNE L99CE
+.L999E LDA (&B6),Y
+       AND #&7F
+       STA (&B6),Y
+       DEY
+       RTS
+       EQUB 0,0,0,0
+ELSE
        JSR L994A        ;; Clear all other bits
        LDY #&04		;; Point to 'E' bit
 IF OPTIMISE<2
@@ -4566,6 +4665,7 @@ ELSE
 ENDIF
 	STA &C22B	; Set 'E/D has been used' flag
 	BMI L99BD
+ENDIF
 ;;
 .L99AA LDX #&02         ;; Check if access character
 .L99AC CMP L931D,X
@@ -4720,13 +4820,13 @@ IF HD_MMC
 	; Returns EQ=Ok, NE=not present or no ADFS partitions
 ENDIF
 IF HD_IDE
-.L9A6C LDA &FC47        ;; &FF - absent, <>&FF - present
-       INC A            ;; &00 - absent, <>&00 - present
+.L9A6C LDX &FC47        ;; &FF - absent, <>&FF - present
+       INX              ;; &00 - absent, <>&00 - present
        BEQ DriveNotPresent
        LDA #0           ;; EQ - present
        RTS
 .DriveNotPresent
-       DEC A
+       DEX              ;; NE - absent
        RTS
        EQUB 0,0,0,0,0,0,0,0
 ENDIF
@@ -4939,15 +5039,20 @@ ENDIF
 ;; =============================
 .L9B4C CPY #&08
        BNE L9B49        ;; No, quit
-       PHY
+.L9B50 PHY
        PHY
        BRA L9B94
 ;;
 ;;
 ;; Serv3 - Boot filing system
 ;; ==========================
-.L9B54 TYA
+.L9B54
+IF USE65C12
+       PHY
+ELSE
+       TYA
        PHA              ;; Save Boot flag
+ENDIF
        LDA #&7A
        JSR &FFF4        ;; Scan keyboard
        INX              ;; No key pressed?
@@ -4961,8 +5066,12 @@ ENDIF
        BEQ L9B74        ;; Yes
        CPX #&43         ;; 'F' pressed?
        BEQ L9B72        ;; Yes, jump to select FS
+IF USE65C12
+       PLY
+ELSE
        PLA
        TAY              ;; Restore Boot flag
+ENDIF
        LDX &F4          ;; Restore ROM number
        LDA #&03         ;; Restore A=FSBoot
        RTS              ;; Return unclaimed
@@ -5067,16 +5176,18 @@ ENDIF
        JSR LB4CD
 IF PRESERVE_CONTEXT
        LDA &C31B        ;; Lib not unset, jump ahead
-       INC A
+       CMP #&FF
        BNE L9C7A
        LDA &CD          ;; If HD, look for $.Library
        AND #32
        BEQ L9C7A
+       BNE L9C41
 IF NOT(TRIM_REDUNDANT)
-       BNE L9C41	; Will fall through
-       EQUB &1B		; leftover bytes
-       EQUB &C3
-       BNE L9C7A        ; leftover bytes
+;       EQUB &41		; leftover bytes
+;       EQUB &1B		; leftover bytes
+;       EQUB &C3
+;       BNE L9C7A        ; leftover bytes
+       EQUB 0,0,0
 ENDIF
 ELSE
        LDA &C318        ;; Is LIB set to ":0.$"?
@@ -5285,7 +5396,9 @@ ENDIF
        JSR &FFDA        ;; Get current filing system
        CMP #&08         ;; Is is ADFS?
        BEQ L9D76        ;; Yes, jump to continue
-       JSR L9B4A        ;; Select ADFS if ADFS not selected
+       JSR L9B4A        ;; Select ADFS if ADFS not selected, and *BANG* Bad map if not ADFS format
+                        ;; **%%"$$$££!!@@@!!@@@@"""***&&STUPID***!*!**"*&"&&"^%"
+                        ;; HTAF do you access disk sectors if there's no ADFS map on ths disk?
 .L9D76 LDA &EF          ;; Get OSWORD number
        CMP #&72         ;; Is it &72?
        BNE L9DC0        ;; No, jump ahead
@@ -5409,23 +5522,37 @@ ENDIF
        BRA L9DB4
 ;;
 .L9DF6 JSR L92A8
+IF OPTIMISE<6
        EQUS &0D, "Advanced DFS "	; Help string
+ELSE
+       EQUS &0D, "Acorn ADFS "		; Help string
+ENDIF
        EQUB (VERSION DIV 256)+48	; Version string
        EQUB "."
        EQUB ((VERSION AND &F0)DIV 16)+48
        EQUB (VERSION AND &0F)+48
        EQUB &8D
        RTS
-.L9E0D TYA
+.L9E0D
+IF USE65C12
+       PHY
+ELSE
+       TYA
        PHA
+ENDIF
        LDA (&F2),Y
        CMP #&20
        BCS L9E3E
        JSR L9DF6
        JSR L92A8
        EQUS "  ADFS", &8D
-.L9E22 PLA
+.L9E22
+IF USE65C12
+       PLY
+ELSE
+       PLA
        TAY
+ENDIF
        LDX &F4
        LDA #&09
 .L9E28 RTS
@@ -5614,7 +5741,7 @@ ENDIF
 .cmdLE EQUS "LEX",      >(LA4C9-1), <(LA4C9-1), &00
        EQUS "LIB",      >(LA482-1), <(LA482-1), &30
        EQUS "MAP",      >(LA092-1), <(LA092-1), &00
-IF PRESERVE_CONTEXT
+IF PRESERVE_CONTEXT AND (HD_SCSI=0)
        EQUS "MOUNT",    >(MountCheck-1), <(MountCheck-1), &40
 ELSE
        EQUS "MOUNT",    >(LA19E-1), <(LA19E-1), &40
@@ -6681,11 +6808,15 @@ ENDIF
        STA &0101,X
        LDA #>(LA7D4-1)
        STA &0102,X      ;; Change return address to LA7D4
+IF OPTIMISE<6
        PLX
        PLY
        PLA
        PLP
        RTS
+ELSE
+       BRA LA7E7
+ENDIF
 ;;
 .LA7C9 LDX #&78
        TXA
@@ -6704,7 +6835,7 @@ ENDIF
        STZ &C2CE
        STZ &C2D5
        STZ &C2D9
-       PLX
+.LA7E7 PLX
        PLY
        PLA
        PLP
@@ -7169,20 +7300,21 @@ ENDIF
 IF HD_IDE
 .LAAD9 PHA
        JSR L8328        ;; Wait for ensuring to complete
+       NOP              ;; Pause for PanOS
+       NOP              ;; Calling SetGeometry stops PanOS working
+       NOP
        JSR WaitNotBusy
-       LDA #1           ;; one sector
-       STA &FC42
-       CLC
-       LDA &C201,X      ;; Set sector b0-b5
-       AND #63
-       ADC #1
-       STA &FC43
-       LDA &C202,X      ;; Set sector b8-b15
-       STA &FC44
-       LDA &C203,X      ;; Set sector b16-b21
-       STA &C333
-       JMP SetRandom
-       EQUB 0,0,0,0
+       LDA &C201,X  
+       JSR SetSecLow    ;; Set sector b0-b5, count=1
+       LDA &C202,X
+       STA &FC44        ;; Set sector b8-b15
+       LDA &C203,X
+       STA &C333        ;; Set active drive
+       JSR SetCylinder  ;; Set sector b16-b21
+       EOR &C201,X      ;; Merge Drive and Head
+       AND #&02
+       EOR &C201,X
+       JMP SetRandom    ;; Set sector b16-b21
 ENDIF
 IF HD_SCSI
 .LAAD9 PHA
@@ -7260,7 +7392,7 @@ ENDIF
 IF HD_IDE
        LDY #&00
        JSR L8332        ;; Wait for IDE not busy
-       BRA LAB76        ;; Always jump to write
+       JMP LAB76        ;; Always jump to write
 .ResultCodes
        EQUB &12
        EQUB &06
@@ -7271,8 +7403,6 @@ IF HD_IDE
        EQUB &11
        EQUB &19
        EQUB &03
-
-       EQUB &82 ; leftover
 ENDIF
 IF HD_SCSI
        LDY #&00
@@ -7311,7 +7441,7 @@ ELSE
        BNE LAB76        ;; Loop for 256 bytes
 ENDIF
        LDA #&01
-       TSB &CD		;; Reset 'file being updated' bit
+       TSB &CD		;; Reset 'files being updated' bit
        DEY
 IF HD_SCSI
        STY &FC43        ;; Set &FC43 to &FF
@@ -7338,14 +7468,27 @@ IF HD_IDE
        STA &C333        ;; Store for any error
        LDA #&7F
        RTS
-       EQUD 0,0,0,0,0,0,0
+.GetResult
+       LDA &FC47        ;; Get IDE result
+       AND #&21
+       BEQ GetResOk
+       LDA &FC41        ;; Get IDE error code, CS already set
+       LDX #&FF
+.GetResLp
+       INX              ;; Translate result code
+       ROR A
+       BCC GetResLp
+       LDA ResultCodes,X
+.GetResOk
+       RTS
        EQUB 0
+       EQUD 0,0
 ENDIF
 IF HD_SCSI
 .LAB89 LDA &CD          ;; Get flags
-       AND #&21         ;; Check for hard drive+IRQ pending
+       AND #&21         ;; Check for hard drive+files being ensured
        CMP #&21
-       BNE LAB98        ;; No hard drive or IRQ pending
+       BNE LAB98        ;; No hard drive or no files being ensured
        JSR L806F        ;; Get SCSI status
        CMP #&F2
        BEQ LAB9B
@@ -7356,7 +7499,7 @@ IF HD_SCSI
        LDA #&00
        STA &FC43
        LDA #&01
-       TRB &CD
+       TRB &CD          ; Clear 'files being ensured'
        LDA &FC40
        JSR L8332
        ORA &FC40	; Get SCSI result
@@ -8633,8 +8776,12 @@ ENDIF
        EOR &C2C2
        BEQ LB5C2
        LDA &C2CD
+IF USE65C12
+       PHX
+ELSE
        TAX
        PHA
+ENDIF
        LDA &C317
        STA &C2CD
        LDY &C22F
@@ -9032,7 +9179,11 @@ ENDIF
 ;;
 .LB8A5 BIT &CD
        BVC LB8AD
+IF HD_IDE
+       JSR TubeStore  ;; Longer delay
+ELSE
        STA TUBEIO
+ENDIF
        RTS
 ;;
 .LB8AD STY &BC
@@ -9261,7 +9412,7 @@ IF FLOPPY
 ;; Pass SCSI command to floppy controller
 ;; --------------------------------------
 .LBA4B JMP LBB46	;; Do a SCSI action with floppy drive
-.LBA4E JMP LBB57
+.LBA4E JMP LBB57	;; Load a partial sector
 .LBA51 JMP LBA5D
 .LBA54 JMP LBA61
 .LBA57 LDA #&FF
@@ -9376,7 +9527,7 @@ ENDIF
        BIT &A1
        BVS LBB38
        LDY #&05
-       LDA (&B0),Y
+       LDA (&B0),Y	;; Command
        CMP #&0B
        BNE LBB38
        BEQ LBB23
@@ -9398,10 +9549,12 @@ ENDIF
        JSR LBB72	; Check and set up address, command, sector, track
        JSR LBDBA
        BEQ LBB23	; EQ, jump to restore and return disk result
-.LBB57 STA &C2E2
+
+; Enter here to load a partial sector
+.LBB57 STA &C2E2	; Store where to load partial sector to
        TSX
        STX &C2E7
-       LDA #&C2
+       LDA #&C2		; Point to copy of command block in workspace
        STA &B1
        LDA #&15
        STA &B0
@@ -9531,28 +9684,28 @@ ENDIF
 ;; Copy NMI code to NMI space
 ;; --------------------------
 .LBC18 LDY #&44
-.LBC1A LDA LBCA0,Y
+.LBC1A LDA LBCA0,Y	;; Copy NMI code to NMI space
        STA &0D00,Y
        DEY
        BPL LBC1A
        LDY #&01
        LDA (&B0),Y
-       STA &0D0E
+       STA &0D0E	;; Set initial dest address
        INY
        LDA (&B0),Y
        STA &0D0F
        BIT &A1
-       BMI LBC39
-       LDA #&5F
+       BMI LBC39	;; Keep AND #&1F if reading
+       LDA #&5F		;; Change to AND #&5F for writing
        STA &0D05
 .LBC39 BIT &CD
-       BVC LBC48
+       BVC LBC48	;; Jump if not Tube transfer
        LDA &A1
-       AND #&FD
+       AND #&FD		;; Clear bit 1 if Tube transfer
        STA &A1
        JSR LBC54
        BMI LBC4B
-.LBC48 JSR LBC83
+.LBC48 JSR LBC83	;; Modify code if writing
 .LBC4B STA &0D5F
        LDA &F4
        STA &0D32
@@ -9560,41 +9713,41 @@ ENDIF
 ;;
 ;;
 .LBC54 LDA &A1
-       ROL A
+       ROL A		;; Copy write/read into Carry
        LDA #&00
-       ROL A
+       ROL A		;; A=0/1 for write/read
        LDY #&C2
        LDX #&27
-       JSR &0406
+       JSR &0406	;; Start Tube transfer
        LDA &A1
        AND #&10
        BEQ LBC76
        BIT &A1
-       BMI LBC77
+       BMI LBC77	;; Jump to copy Tube Read code
        LDY #&07
-.LBC6D LDA LBD0E,Y
+.LBC6D LDA LBD0E,Y	;; Copy Tube Write code
        STA &0D0A,Y
        DEY
        BPL LBC6D
 .LBC76 RTS
 ;;
 .LBC77 LDY #&07
-.LBC79 LDA LBD16,Y
+.LBC79 LDA LBD16,Y	;; Copy Tube Read code
        STA &0D0A,Y
        DEY
        BPL LBC79
        RTS
 ;;
 .LBC83 BIT &A1
-       BMI LBC9F
+       BMI LBC9F	;; Exit if reading
        LDY #&0D
-.LBC89 LDA LBD00,Y
+.LBC89 LDA LBD00,Y	; Change transfer code for writing
        STA &0D0A,Y
        DEY
        BPL LBC89
        LDY #&01
        LDA (&B0),Y
-       STA &0D0B
+       STA &0D0B	; Set initial source address
        INY
        LDA (&B0),Y
        STA &0D0C
@@ -9605,14 +9758,16 @@ ENDIF
 ; DO NOT ATTEMPT TO OPTIMISE!
 .LBCA0 PHA
        LDA &FE28        ;; FDC Status/Command
-       AND #&1F
+       AND #&1F		;; #&1F or #&5F
        CMP #&03
        BNE LBCBA
+; vvvv this part changed for writing
        LDA &FE2B        ;; FDC Data
        STA &FFFF        ;; Replaced with destination address
        INC &0D0E
        BNE LBCB8
        INC &0D0F
+; ^^^^
 .LBCB8 PLA
        RTI
 ;;
@@ -9641,6 +9796,7 @@ ENDIF
        STA &FE30
        PLA
        RTI
+;; End of NMI code
 ;;
 .LBCE5 LDA &A2
        ROR A
@@ -9657,17 +9813,29 @@ ENDIF
        STA &A0
        JMP LBFB7
 ;;
+; NMI code for writing, copied to &0D0A
+; -------------------------------------
+; DO NOT ATTEMPT TO OPTIMISE!
 .LBD00 LDA &FFFF
        STA &FE2B        ;; FDC Data register
        INC &0D0B
        BNE LBD0E
        INC &0D0C
+
+; NMI code for Tube writing, copied to &0D0A
+; ------------------------------------------
+; DO NOT ATTEMPT TO OPTIMISE!
 .LBD0E LDA TUBEIO
        STA &FE2B        ;; FDC Data register
        BCS LBD1C
+
+; NMI code for Tube reading, copied to &0D0A
+; ------------------------------------------
+; DO NOT ATTEMPT TO OPTIMISE!
 .LBD16 LDA &FE2B        ;; FDC Data register
        STA TUBEIO
 .LBD1C BCS LBD24
+
 .LBD1E BIT &A1
        BMI LBD2F
        LDA &A3
@@ -9736,9 +9904,9 @@ ENDIF
        STA &A5
        LDA &C217
        STA &A6
-       LDA #&00
+       LDA #&00 
        STA &A3
-       LDA &C2E2
+       LDA &C2E2	;; Point &A3/4 to where partial sector loaded
        STA &A4
        BIT &CD
        BVC LBDAB
@@ -9746,16 +9914,16 @@ ENDIF
 .LBD99 LDA (&A3),Y
        LDX #&07
 .LBD9D DEX
-       BNE LBD9D
+       BNE LBD9D	;; Tube transfer delay
        STA TUBEIO
        INY
        CPY &C21E
        BNE LBD99
        BEQ LBDB6
-.LBDAB LDY &C21E
+.LBDAB LDY &C21E	;; Get partial sector length
 .LBDAE DEY
        LDA (&A3),Y
-       STA (&A5),Y
+       STA (&A5),Y	;; Copy to memory
        TYA
        BNE LBDAE
 .LBDB6 PLA
@@ -9766,58 +9934,60 @@ ENDIF
        LDA #&40
        TSB &A2
        LDY #&07
-       LDA (&B0),Y
+       LDA (&B0),Y	;; Sector b8-b15
        STA &0D58
        INY
-       LDA (&B0),Y
+       LDA (&B0),Y	;; Sector b0-b7
        INY
        CLC
-       ADC (&B0),Y
-       STA &0D59
+       ADC (&B0),Y	;; Sector count
+       STA &0D59	;; Sector b0-b7+count
        BCC LBDD7
-       INC &0D58
+       INC &0D58	;; &0D59/8=sector after last sector
 .LBDD7 LDA &0D58
        TAX
        LDA &0D59
        LDY #&FF
-       JSR LBFAB
+       JSR LBFAB	;; Convert to Y=track, A=sector
        CMP #&00
-       BNE LBDE9
-       LDA #&10
+       BNE LBDE9	;; Not sector 0
+       LDA #&10		;; Convert sector 0 to pseudo sector &10
 .LBDE9 LDY #&09
        SEC
-       SBC (&B0),Y
-       BCS LBE0D
+       SBC (&B0),Y	;; EndSector - SectorCount
+       BCS LBE0D	;; Only one track left to do
        LDA #&10
        SEC
-       SBC &A4
-       STA &0D58
-       LDA (&B0),Y
+       SBC &A4		;; 16-sector = number to do on this track
+       STA &0D58	;; sector count for this track
+       LDA (&B0),Y	;; Get sector count
        SEC
-       SBC &0D58
+       SBC &0D58	;; Subtract count for this track
        LDX #&00
        LDY #&FF
-       JSR LBFAB
-       STY &0D57
-       STA &0D59
+       JSR LBFAB	;; Convert to Y=track, A=sector
+       STY &0D57	;; Store track about to start at
+       STA &0D59	;; Store sector about to start at
        BPL LBE1C
+
 .LBE0D LDY #&09
-       LDA (&B0),Y
+       LDA (&B0),Y	;; Get sector count
        STA &0D58
        LDA #&FF
-       STA &0D57
-       STZ &0D59
+       STA &0D57	;; track=&FF
+       STZ &0D59	;; sector=&00
+
 .LBE1C STZ &0D5A
        INC &0D57
        DEC &0D58
        LDX #&01
-       JSR LBB3B
+       JSR LBB3B	;; Set track
        BIT &A1
        BMI LBE35
-       LDA #&A0
+       LDA #&A0		;; &A0=writing
        ORA &0D56
        BNE LBE37
-.LBE35 LDA #&80
+.LBE35 LDA #&80		;; &80=reading
 .LBE37 STA &A6
        JSR LBD46
        LDA &A6
@@ -9925,7 +10095,7 @@ ENDIF
 .LBF09 RTS
 
 ;;
-;;   &A0  Returned error, &40+FDC status or &40+HDD error
+;;   &A0  Returned error, &40+FDC status or &00+HDD error
 ;;   &A1  b7=write/read, b5=hardware has been accessed, b0=error occured?
 ;;   &A2  b0=?
 ;;   &A3
@@ -9934,9 +10104,14 @@ ENDIF
 ;;   &A6 drive
 ;;   &A7
 ;;
-.LBF0A LDY #&06
+.LBF0A
+IF OPTIMISE<6
+       LDY #&06
        LDA (&B0),Y	;; Get drive
        ORA &C317	;; OR with current drive
+ELSE
+       JSR GetDrive
+ENDIF
        STA &A6          ;; Store drive in &A6
        AND #&1F         ;; Lose drive bits
        BEQ LBF1A	;; If sector<&10000, continue
@@ -9952,7 +10127,11 @@ ENDIF
        LDA #&65         ;; Otherwise, floppy error &25 (Bad drive)
 IF OPTIMISE<2
        STA &A0          ;; Set error
+IF EXTERNAL
+       BNE LBF75        ;; Make external call for 2,3,6,7
+ELSE
        BNE LBF73        ;; Jump to return error
+ENDIF
 ELSE
        BNE LBF71	;; Jump to return error
 ENDIF
@@ -10011,6 +10190,7 @@ ENDIF
 .LBF73 BNE LBFB7	;; Jump to return error in &A0
 
 IF NOT(TRIM_REDUNDANT)
+IF NOT(EXTERNAL)
 ; This code never entered, as the above BCC LBF75 is never followed.
 ; It seems as though it is attempting to check if sector+length would span
 ; past the end of the disk, but any transfer that starts before the end of
@@ -10029,6 +10209,15 @@ IF NOT(TRIM_REDUNDANT)
 .LBF89 LDA #&63		;; Floppy error &23 (Volume error)
        STA &A0		;; Store error
        BNE LBFB7	;; Jump to return error
+ELSE
+.LBF75 LDX &B0
+       LDY &B1
+       LDA #&76
+       JSR &FFF1
+       JMP LBFB7
+       EQUB 0,0,0,0,0,0,0
+       EQUB 0,0,0,0,0,0,0
+ENDIF
 ENDIF
 
 ; Sector < &A00, convert to track+sector
@@ -10057,7 +10246,7 @@ ENDIF
 ; ============
 ; On entry: A=low byte
 ;           X=high byte
-;           Y=&FF
+;           Y=&FF (this could be moved to subroutine)
 ; On exit:  Y=&XA DIV 16
 ;           A=&XA MOD 16
 .LBFAB SEC
@@ -10115,7 +10304,7 @@ IF HD_MMC
         EQUB &00	;; MMC revision 0
 ENDIF
 IF HD_IDE
-        EQUB &21	;; IDEPatch revision 1.21
+        EQUB &24	;; IDEPatch revision 1.24
 ENDIF
 IF HD_SCSI
         EQUB &A9	;; 'A'corn revision 9
@@ -10124,3 +10313,4 @@ ENDIF
 PRINT "Code ends at",~LBFFF+1,"(",(&BFFF-LBFFF),"bytes free)"
 
 SAVE "", &8000, &C000
+
