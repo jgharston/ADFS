@@ -12,7 +12,8 @@
 ;  ADFS Master IDE  v1.53r24
 ;  ADFS Master MMC
 ; Does not yet build correctly for BBC or Electron.
-; TODO: Add +WS to workspace references.
+; TODO: Add -WS to workspace references.
+; TODO: Add rewritten MMC drivers to upload.
 
 
 ; OPTIMISE flag sets how hard to optimise
@@ -59,6 +60,7 @@ ENDIF
 IF   TARGETOS=0
   CPU 0			; 6502
   VERBASE=&100		; Electron
+  HDDBASE=&FC40		; Hard drive controller
   FDCBASE=&FCC4		; Floppy controller
   DRVSEL =FDCBASE-4	; Drive control register
   FDCRES =&20		; Reset FDC
@@ -67,10 +69,11 @@ IF   TARGETOS=0
   VIABASE=&FC60		; 6522 VIA
   TUBEIO =&FCE5		; Tube data port
   FILEBLK=&02E2		; OSFILE control block
-  WS=&E00-&C000		; Offset to workspace from &C000
+  WS=&C000-&E00		; Offset from workspace to &C000
 ELIF TARGETOS=1 OR TARGETOS=2
   CPU 0			; 6502
   VERBASE=&130		; BBC B, BBC B+
+  HDDBASE=&FC40		; Hard drive controller
   FDCBASE=&FE84		; Floppy controller
   DRVSEL =FDCBASE-4	; Drive control register
   FDCRES =&20		; Reset FDC
@@ -79,7 +82,7 @@ ELIF TARGETOS=1 OR TARGETOS=2
   VIABASE=&FE60		; 6522 VIA
   TUBEIO =&FEE5		; Tube data port
   FILEBLK=&02EE         ; OSFILE control block
-  WS=&E00-&C000		; Offset to workspace from &C000
+  WS=&C000-&E00		; Offset from workspace to &C000
 ELIF TARGETOS>2
   CPU 1			; 65c12
   VERBASE=&150		; Master
@@ -92,7 +95,7 @@ ELIF TARGETOS>2
   VIABASE=&FE60		; 6522 VIA
   TUBEIO =&FEE5		; Tube data port
   FILEBLK=&02EE		; OSFILE control block
-  WS=0			; Offset to workspace from &C000
+  WS=&C000-&C000	; Offset from workspace to &C000
 ENDIF
 
 VERSION=VERBASE + (PRESERVE_CONTEXT AND 1) + (HD_IDE AND 2) + (HD_MMC AND 6)
